@@ -5,7 +5,7 @@ from pyrogram.errors import UserNotParticipant
 
 API_ID = 35405228
 API_HASH = "dacba460d875d963bbd4462c5eb554d6"
-BOT_TOKEN = "8347648592:AAE1RdiNTydfOk10ufRsWm81-jv8CKecElU"
+BOT_TOKEN = "8347648592:AAG4rtXI6JQkRZKxhgNV3yrb-Lhp1GPF2nQ"
 CHANNEL_ID = -1003547072209 
 PUBLIC_CHANNEL = "@MoAlmohsen" 
 
