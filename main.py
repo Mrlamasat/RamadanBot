@@ -2,101 +2,115 @@ import os
 import logging
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant
 
-# ===== Logging =====
+# ==============================
+# إعدادات التسجيل (Logging)
+# ==============================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# ===== Fetch environment variables safely =====
-def get_env(name, cast=str):
+# ==============================
+# جلب متغيرات البيئة بأمان
+# ==============================
+def get_env(name, required=True, cast=str):
     value = os.environ.get(name)
-    if not value:
-        raise ValueError(f"{name} is missing in Environment Variables!")
-    return cast(value)
+    if required and not value:
+        raise ValueError(f"Environment variable {name} is missing!")
+    return cast(value) if value else None
 
-API_ID = get_env("API_ID", int)
+
+API_ID = get_env("API_ID", cast=int)
 API_HASH = get_env("API_HASH")
 BOT_TOKEN = get_env("BOT_TOKEN")
-CHANNEL_ID = get_env("CHANNEL_ID", int)
-PUBLIC_CHANNEL = get_env("PUBLIC_CHANNEL")  # @username أو -1001234567890
+CHANNEL_ID = get_env("CHANNEL_ID", cast=int)
 
-# ===== Initialize bot =====
-app = Client("RamadanBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ==============================
+# بروكسي اختياري (لو موجود)
+# ==============================
+PROXY_HOST = os.environ.get("PROXY_HOST")
+PROXY_PORT = os.environ.get("PROXY_PORT")
 
-# ===== /start command =====
+proxy = None
+if PROXY_HOST and PROXY_PORT:
+    proxy = {
+        "scheme": "socks5",
+        "hostname": PROXY_HOST,
+        "port": int(PROXY_PORT)
+    }
+    logging.info("Proxy enabled.")
+
+# ==============================
+# تشغيل البوت
+# ==============================
+app = Client(
+    "RamadanBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    proxy=proxy,
+    ipv6=False
+)
+
+
+# ==============================
+# أمر /start
+# ==============================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    user_id = message.from_user.id
-    file_id = message.command[1] if len(message.command) > 1 else None
+    if len(message.command) > 1:
+        file_id = message.command[1]
 
-    try:
-        # تحقق من الاشتراك
-        await client.get_chat_member(PUBLIC_CHANNEL, user_id)
+        if not file_id.isdigit():
+            await message.reply("❌ رابط غير صالح.")
+            return
 
-        # إذا مشترك ومعه رقم ملف، أرسله
-        if file_id and file_id.isdigit():
+        try:
             await client.copy_message(
                 chat_id=message.chat.id,
                 from_chat_id=CHANNEL_ID,
                 message_id=int(file_id)
             )
-        else:
-            await message.reply_text(
-                f"👋 أهلاً بك يا {message.from_user.first_name}!\n"
-                "أرسل لي رابط فيديو لمشاهدته."
-            )
+        except Exception as e:
+            logging.error(f"Copy failed: {e}")
+            await message.reply("❌ لا يمكن جلب هذا الملف.")
+    else:
+        await message.reply(
+            "👋 أهلاً بك يا محمد!\n\n"
+            "أرسل /start مع الرابط الخاص بالفيديو للحصول عليه."
+        )
 
-    except UserNotParticipant:
-        # لم يشترك بعد
-        buttons = [
-            [InlineKeyboardButton("1️⃣ اشترك في القناة أولاً", url=f"https://t.me/{PUBLIC_CHANNEL.strip('@')}")]
-        ]
-        if file_id and file_id.isdigit():
-            buttons.append([InlineKeyboardButton(
-                "2️⃣ تم الاشتراك.. مشاهدة الآن ✅",
-                callback_data=f"check_{file_id}"
-            )])
+
+# ==============================
+# توليد رابط عند رفع فيديو
+# ==============================
+@app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
+async def generate_link(client, message):
+    try:
+        me = await client.get_me()
+        bot_username = me.username
+
+        share_link = f"https://t.me/{bot_username}?start={message.id}"
+
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔗 مشاركة الرابط", url=share_link)]]
+        )
 
         await message.reply_text(
-            f"👋 مرحباً {message.from_user.first_name}!\n\n"
-            "يجب عليك الانضمام للقناة أولاً لتتمكن من مشاهدة الفيديوهات.",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            "✅ تم حفظ الملف بنجاح!\n\n"
+            "اضغط الزر بالأسفل لنسخ رابط المشاركة:",
+            reply_markup=keyboard,
+            quote=True
         )
 
-# ===== Handle callback "check" button =====
-@app.on_callback_query(filters.regex(r"^check_"))
-async def check_subscription(client, callback_query):
-    file_id = callback_query.data.split("_")[1]
-    user_id = callback_query.from_user.id
+    except Exception as e:
+        logging.error(f"Error generating link: {e}")
 
-    try:
-        await client.get_chat_member(PUBLIC_CHANNEL, user_id)
-        await callback_query.message.delete()
-        await client.copy_message(
-            chat_id=user_id,
-            from_chat_id=CHANNEL_ID,
-            message_id=int(file_id)
-        )
-    except UserNotParticipant:
-        await callback_query.answer(
-            "⚠️ أنت لم تشترك في القناة بعد! اشترك ثم اضغط مجددًا.",
-            show_alert=True
-        )
 
-# ===== When a video/document is uploaded to CHANNEL_ID =====
-@app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
-async def get_link(client, message):
-    me = await client.get_me()
-    share_link = f"https://t.me/{me.username}?start={message.id}"
-    await message.reply_text(
-        f"✅ تم الحفظ!\n\n🔗 رابط النشر:\n`{share_link}`",
-        quote=True
-    )
-
-# ===== Run bot =====
+# ==============================
+# تشغيل البوت
+# ==============================
 if __name__ == "__main__":
     logging.info("🚀 Bot is starting...")
     app.run()
