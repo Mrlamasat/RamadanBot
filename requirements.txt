@@ -1,3 +1,4 @@
 pyrogram
-asyncpg
 tgcrypto
+Pillow
+asyncpg
