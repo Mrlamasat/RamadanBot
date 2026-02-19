@@ -7,19 +7,19 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant
 from PIL import Image, ImageDraw, ImageFont
 
-# ===== إعدادات التسجيل =====
+# ===== إعدادات التسجيل لمتابعة الأخطاء =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ===== المتغيرات =====
+# ===== المتغيرات الأساسية =====
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0)) # تأكد أنه يبدأ بـ -100
 PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "").replace("@", "")
 
-app = Client("MohammedFinalProBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("MohammedFinalPro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ===== قاعدة البيانات =====
+# ===== إعداد قاعدة البيانات SQLite =====
 DB_PATH = "bot_data.db"
 
 def init_db():
@@ -49,26 +49,23 @@ def db_execute(query, params=(), fetch=False):
         if fetch:
             return cursor.fetchall()
     except Exception as e:
-        logging.error(f"SQLite error: {e}")
+        logging.error(f"SQLite Error: {e}")
         return []
     finally:
         conn.close()
 
 # ===== دوال مساعدة =====
 def format_duration(seconds):
-    if not seconds:
-        return "00:00"
+    if not seconds: return "00:00"
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{mins}:{secs:02d} دقيقة"
 
-# ===== دالة التصميم (تم حذف الدائرة الغبية ودمج الوقت في الشريط السفلي) =====
 def create_super_poster(base_path, duration_text, quality_text, output=None):
     try:
         base = Image.open(base_path).convert("RGBA")
         width, height = base.size
         try:
-            # تكبير الخط قليلاً ليكون واضحاً في الشريط
             font_info = ImageFont.truetype("Cairo-Bold.ttf", int(width * 0.040))
         except:
             font_info = ImageFont.load_default()
@@ -87,17 +84,16 @@ def create_super_poster(base_path, duration_text, quality_text, output=None):
             temp = base.copy()
             draw = ImageDraw.Draw(temp)
 
-            # 1. شريط المعلومات السفلي (نظيف ومرتب)
+            # شريط المعلومات السفلي (نظيف)
             bar_h = int(height * 0.14)
             draw.rectangle([0, height - bar_h, width, height], fill=(0, 0, 0, 230))
             
-            # ترتيب المعلومات: الوقت • الجودة • سنة العرض
             info_text = f"{duration_text}  •  {quality_text}  •  2026  •  🔥"
             bbox = draw.textbbox((0,0), info_text, font=font_info)
             tx = (width - (bbox[2]-bbox[0]))//2
             draw.text((tx, height - bar_h + int(bar_h*0.28)), info_text, font=font_info, fill="white")
 
-            # 2. زر التشغيل (وحيد في المركز ليعطي هيبة)
+            # زر التشغيل المركزي
             w_p, h_p = int(btn_w*scale), int(btn_h*scale)
             btn_resized = btn_src.resize((w_p, h_p), Image.LANCZOS)
             btn_x, btn_y = (width-w_p)//2, (height-h_p)//2
@@ -108,10 +104,10 @@ def create_super_poster(base_path, duration_text, quality_text, output=None):
         frames[0].save(output, save_all=True, append_images=frames[1:], duration=120, loop=0)
         return output
     except Exception as e:
-        logging.error(f"Poster creation error: {e}")
+        logging.error(f"Design Error: {e}")
         return base_path
 
-# ===== استقبال الفيديو =====
+# ===== 1. استقبال الفيديو =====
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
@@ -120,25 +116,25 @@ async def receive_video(client, message):
                (str(message.id), d_text, "waiting", message.from_user.id))
     await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\nالآن أرسل البوستر.")
 
-# ===== استقبال البوستر وإظهار خيارات الجودة =====
+# ===== 2. استقبال البوستر وإظهار خيارات الجودة =====
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
     res = db_execute("SELECT v_id FROM videos WHERE status='waiting' AND user_id=? ORDER BY v_id DESC LIMIT 1", (message.from_user.id,), fetch=True)
-    if not res:
-        return
+    if not res: return
     v_id = res[0][0]
+    
     path = await message.download()
     title = message.caption or "حلقة جديدة"
     db_execute("UPDATE videos SET poster_path=?, title=? WHERE v_id=?", (path, title, v_id))
     
-    quality_markup = InlineKeyboardMarkup([
+    markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("HD", callback_data=f"q_HD_{v_id}"),
          InlineKeyboardButton("SD", callback_data=f"q_SD_{v_id}"),
          InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]
     ])
-    await message.reply_text("📌 اختر الجودة للنشر الفوري:", reply_markup=quality_markup)
+    await message.reply_text("📌 اختر الجودة للنشر:", reply_markup=markup)
 
-# ===== معالجة اختيار الجودة والنشر =====
+# ===== 3. معالجة اختيار الجودة والنشر =====
 @app.on_callback_query(filters.regex(r"^q_"))
 async def quality_callback(client, query):
     _, quality, v_id = query.data.split("_")
@@ -148,7 +144,7 @@ async def quality_callback(client, query):
         return
     duration, title, poster_path = res[0]
 
-    await query.message.edit(f"🚀 جاري معالجة البوستر السينمائي ({quality})...")
+    await query.message.edit(f"🚀 جاري معالجة البوستر ({quality})...")
     gif_path = create_super_poster(poster_path, duration, quality)
 
     bot_info = await client.get_me()
@@ -164,33 +160,44 @@ async def quality_callback(client, query):
     if os.path.exists(gif_path): os.remove(gif_path)
     await query.message.delete()
 
-# ===== نظام الـ Start المعدل (لضمان التشغيل) =====
+# ===== 4. نظام Start (المُصلح) لجلب الفيديو =====
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     if len(message.command) > 1:
         v_id = message.command[1]
     else:
-        await message.reply_text(f"أهلاً بك يا {message.from_user.first_name}! البوت يعمل بنجاح.")
+        await message.reply_text(f"أهلاً بك يا {message.from_user.first_name}!")
         return
-    try:
-        await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
-        await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id))
-    except UserNotParticipant:
-        btn = [[InlineKeyboardButton("📢 اشترك أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")],
-               [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
-        await message.reply_text("⚠️ يجب الاشتراك في القناة أولاً لمشاهدة الحلقة.", reply_markup=InlineKeyboardMarkup(btn))
-    except Exception:
-        await message.reply_text("❌ الرابط غير صالح أو تم حذف الفيديو.")
 
-# ===== زر التأكد من الاشتراك =====
+    try:
+        # فحص الاشتراك
+        await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
+        
+        # النسخ من القناة (البوت يجب أن يكون مشرفاً)
+        await client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=int(CHANNEL_ID),
+            message_id=int(v_id)
+        )
+    except UserNotParticipant:
+        btn = [[InlineKeyboardButton("📢 اشترك في القناة", url=f"https://t.me/{PUBLIC_CHANNEL}")],
+               [InlineKeyboardButton("✅ تم الاشتراك - شاهد", callback_data=f"chk_{v_id}")]]
+        await message.reply_text("⚠️ يجب الاشتراك في القناة أولاً لتفعيل الرابط.", reply_markup=InlineKeyboardMarkup(btn))
+    except Exception as e:
+        logging.error(f"Error in start: {e}")
+        await message.reply_text("❌ عذراً، الرابط غير صالح أو تأكد من أن البوت مشرف في القناة.")
+
+# ===== 5. زر التأكد من الاشتراك =====
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def check_subscription(client, query):
     v_id = query.data.split("_")[1]
     try:
         await client.get_chat_member(PUBLIC_CHANNEL, query.from_user.id)
         await query.message.delete()
-        await client.copy_message(query.from_user.id, CHANNEL_ID, int(v_id))
+        await client.copy_message(query.from_user.id, int(CHANNEL_ID), int(v_id))
     except UserNotParticipant:
         await query.answer("⚠️ لم تشترك بعد!", show_alert=True)
+    except Exception:
+        await query.answer("❌ حدث خطأ في جلب الفيديو.", show_alert=True)
 
 app.run()
