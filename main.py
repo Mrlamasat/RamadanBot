@@ -9,104 +9,109 @@ from PIL import Image, ImageDraw, ImageFont
 # ===== إعدادات التسجيل =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ===== المتغيرات الأساسية =====
+# ===== المتغيرات =====
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
 PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "").replace("@", "")
 
-app = Client("MohammedCleanPoster", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("MohammedFinalPro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ===== قاعدة البيانات =====
+# ===== إعداد قاعدة البيانات SQLite =====
 def init_db():
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS videos 
-                      (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
-                       poster_path TEXT, poster_id TEXT, status TEXT)''')
+                      (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, poster_path TEXT, status TEXT)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-def db_execute(query, params=(), fetch=True):
+def db_execute(query, params=()):
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
     cursor.execute(query, params)
     conn.commit()
-    res = cursor.fetchall() if fetch else None
+    result = cursor.fetchall()
     conn.close()
-    return res
+    return result
 
-# ===== دوال التصميم (بدون كتابة على الصورة) =====
+# ===== دوال مساعدة =====
 def format_duration(seconds):
     if not seconds: return "00:00"
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{mins}:{secs:02d} دقيقة"
 
-def create_super_poster(base_path, output="final_animation.gif"):
+def create_super_poster(base_path, duration_text, quality_text, output="final_animation.gif"):
     try:
-        # فتح الصورة الأصلية
         base = Image.open(base_path).convert("RGBA")
         width, height = base.size
-        
+        try:
+            font_info = ImageFont.truetype("Cairo-Bold.ttf", int(width * 0.040))
+        except:
+            font_info = ImageFont.load_default()
+
         btn_src = Image.open("play_button.png").convert("RGBA")
         btn_w = int(width * 0.22)
         btn_h = int(btn_src.height * (btn_w / btn_src.width))
 
         frames = []
-        # حركة نبض بسيطة لزر التشغيل فقط
-        scales = [1.0, 1.05, 1.1, 1.05, 1.0] 
-        
+        scales = [1.0, 1.03, 1.06, 1.03, 1.0, 0.97]
+
         for scale in scales:
             temp = base.copy()
-            # لا توجد مستطيلات أو نصوص هنا ليبقى البوستر نظيفاً
+            draw = ImageDraw.Draw(temp)
+            bar_h = int(height * 0.14)
+            draw.rectangle([0, height - bar_h, width, height], fill=(0, 0, 0, 230))
             
-            w_p, h_p = int(btn_w * scale), int(btn_h * scale)
-            btn_resized = btn_src.resize((w_p, h_p), Image.Resampling.LANCZOS)
-            
-            # وضع الزر في المنتصف
-            temp.paste(btn_resized, ((width - w_p)//2, (height - h_p)//2), btn_resized)
-            
-            # الحفاظ على الجودة العالية
-            frames.append(temp.convert("P", palette=Image.Palette.ADAPTIVE))
+            # ترتيب المعلومات: المدة • الجودة • سنة العرض
+            info_text = f"{duration_text}  •  {quality_text}  •  2026  •  🔥"
+            bbox = draw.textbbox((0, 0), info_text, font=font_info)
+            tx = (width - (bbox[2] - bbox[0])) // 2
+            draw.text((tx, height - bar_h + int(bar_h * 0.25)), info_text, font=font_info, fill="white")
 
-        # حفظ الـ GIF بجودة عالية
-        frames[0].save(output, save_all=True, append_images=frames[1:], duration=150, loop=0, optimize=False)
+            w_p, h_p = int(btn_w * scale), int(btn_h * scale)
+            btn_resized = btn_src.resize((w_p, h_p), Image.LANCZOS)
+            temp.paste(btn_resized, ((width - w_p)//2, (height - h_p)//2), btn_resized)
+            frames.append(temp.convert("RGB"))
+
+        frames[0].save(output, save_all=True, append_images=frames[1:], duration=120, loop=0)
         return output
     except Exception as e:
         logging.error(f"Design error: {e}")
         return base_path
 
-# ===== استقبال الميديا =====
+# ===== 1. استقبال الفيديو وحفظه في القاعدة =====
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
+    d_text = format_duration(duration)
     db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)", 
-               (str(message.id), format_duration(duration), "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم ربط الفيديو.\nأرسل البوستر الآن.")
+               (str(message.id), d_text, "waiting"))
+    await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\nأرسل البوستر الآن.")
 
+# ===== 2. استقبال البوستر وإظهار أزرار الجودة =====
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
     res = db_execute("SELECT v_id FROM videos WHERE status = 'waiting' ORDER BY v_id DESC LIMIT 1")
     if not res: return
     v_id = res[0][0]
     
-    poster_id = message.photo.file_unique_id
     path = await message.download()
     title = message.caption or "حلقة جديدة"
+    db_execute("UPDATE videos SET poster_path = ?, title = ? WHERE v_id = ?", (path, title, v_id))
     
-    db_execute("UPDATE videos SET poster_path = ?, title = ?, poster_id = ? WHERE v_id = ?", 
-               (path, title, poster_id, v_id), fetch=False)
-    
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("HD", callback_data=f"q_HD_{v_id}"),
-                                    InlineKeyboardButton("SD", callback_data=f"q_SD_{v_id}"),
-                                    InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]])
-    await message.reply_text(f"📌 تم الربط: {title}\nاختر الجودة للنشر:", reply_markup=markup)
+    quality_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("HD", callback_data=f"q_HD_{v_id}"),
+         InlineKeyboardButton("SD", callback_data=f"q_SD_{v_id}"),
+         InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]
+    ])
+    await message.reply_text("📌 اختر الجودة للنشر الفوري:", reply_markup=quality_markup)
 
-# ===== النشر النهائي (المعلومات في الـ Caption) =====
+# ===== 3. معالجة اختيار الجودة والنشر النهائي =====
 @app.on_callback_query(filters.regex(r"^q_"))
 async def quality_callback(client, query):
     _, quality, v_id = query.data.split("_")
@@ -114,84 +119,52 @@ async def quality_callback(client, query):
     if not res: return
     duration, title, poster_path = res[0]
 
-    await query.message.edit(f"🚀 جاري معالجة البوستر ونشر الحلقة...")
-    
-    # إنشاء البوستر النظيف (زر التشغيل فقط)
-    gif_path = create_super_poster(poster_path)
+    await query.message.edit(f"🚀 جاري معالجة البوستر السينمائي ({quality})...")
+    gif_path = create_super_poster(poster_path, duration, quality)
     
     bot_info = await client.get_me()
     link = f"https://t.me/{bot_info.username}?start={v_id}"
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الحلقة الآن", url=link)]])
     
-    # تجميع كل المعلومات في وصف الرسالة (Caption) كما طلبت
-    caption_text = (
-        f"🎬 **{title}**\n\n"
-        f"⏱ المـدة: {duration}\n"
-        f"✨ الجـودة: {quality}\n"
-        f"🗓 سـنة العرض: 2026\n\n"
-        f"📥 [اضغط هنا للمشاهدة الآن]({link})\n"
-        f"━━━━━━━━━━━━━━"
-    )
+    await client.send_animation(CHANNEL_ID, animation=gif_path, 
+                               caption=f"🎬 **{title}**\n\n📥 [اضغط هنا للمشاهدة الآن]({link})", 
+                               reply_markup=markup)
     
-    await client.send_animation(
-        CHANNEL_ID, 
-        animation=gif_path, 
-        caption=caption_text, 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الحلقة الآن", url=link)]])
-    )
-    
-    db_execute("UPDATE videos SET status = 'posted' WHERE v_id = ?", (v_id,), fetch=False)
+    db_execute("UPDATE videos SET status = 'posted' WHERE v_id = ?", (v_id,))
     if os.path.exists(poster_path): os.remove(poster_path)
     if os.path.exists(gif_path): os.remove(gif_path)
     await query.message.delete()
 
-# ===== نظام الـ Start =====
+# ===== 4. نظام الـ Start المعدل (حل مشكلة عدم جلب الفيديو) =====
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
-    if len(message.command) <= 1:
-        await message.reply_text(f"أهلاً بك يا محمد!")
+    if len(message.command) > 1:
+        v_id = message.command[1]
+    else:
+        await message.reply_text(f"أهلاً بك يا محمد! استخدم روابط القناة لمشاهدة الحلقات.")
         return
 
-    v_id = message.command[1]
     try:
+        # فحص الاشتراك الإجباري
         await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
-        
-        video_data = db_execute("SELECT poster_id, title FROM videos WHERE v_id = ?", (v_id,))
-        markup = None
-        if video_data and video_data[0][0]:
-            poster_id, title = video_data[0]
-            all_ep = db_execute("SELECT v_id FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY v_id ASC", (poster_id,))
-            
-            if len(all_ep) > 1:
-                btns = []
-                row = []
-                for i, ep in enumerate(all_ep, 1):
-                    row.append(InlineKeyboardButton(f"الحلقة {i}", url=f"https://t.me/{(await client.get_me()).username}?start={ep[0]}"))
-                    if len(row) == 2:
-                        btns.append(row)
-                        row = []
-                if row: btns.append(row)
-                markup = InlineKeyboardMarkup(btns)
-
+        # إرسال الفيديو فوراً
         await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id))
-        
-        if markup:
-            await message.reply_text(f"📺 **باقي حلقات مسلسل {title}:**", reply_markup=markup)
-
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")],
-               [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
-        await message.reply_text("⚠️ اشترك بالقناة لتفعيل روابط المشاهدة.", reply_markup=InlineKeyboardMarkup(btn))
-    except:
-        await message.reply_text("❌ الفيديو غير موجود.")
+               [InlineKeyboardButton("✅ تم الاشتراك - شاهد الآن", callback_data=f"chk_{v_id}")]]
+        await message.reply_text("⚠️ يجب الاشتراك في القناة أولاً لتفعيل الرابط والمشاهدة.", reply_markup=InlineKeyboardMarkup(btn))
+    except Exception as e:
+        await message.reply_text("❌ عذراً، هذا الرابط لم يعد يعمل أو تم حذف الفيديو.")
 
+# ===== 5. زر التأكد من الاشتراك بعد الضغط =====
 @app.on_callback_query(filters.regex(r"^chk_"))
-async def check_sub(client, query):
+async def check_subscription(client, query):
     v_id = query.data.split("_")[1]
     try:
         await client.get_chat_member(PUBLIC_CHANNEL, query.from_user.id)
         await query.message.delete()
         await client.copy_message(query.from_user.id, CHANNEL_ID, int(v_id))
-    except:
-        await query.answer("⚠️ اشترك أولاً!", show_alert=True)
+    except UserNotParticipant:
+        await query.answer("⚠️ لم تشترك بعد! اشترك ثم اضغط مرة أخرى.", show_alert=True)
 
 app.run()
