@@ -5,11 +5,10 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant
 
-# ================= إعداد المتغيرات =================
+# --------------------- إعداد المتغيرات ---------------------
 def get_env_int(name):
     val = os.getenv(name)
-    if not val:
-        raise ValueError(f"❌ {name} مفقود!")
+    if not val: raise ValueError(f"❌ المتغير {name} مفقود!")
     return int(val)
 
 API_ID = get_env_int("API_ID")
@@ -20,13 +19,15 @@ PUBLIC_CHANNEL = os.getenv("PUBLIC_CHANNEL", "").replace("@", "")
 DATABASE_URL = os.getenv("DATABASE_URL") or ""
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
+# تصحيح رابط PostgreSQL إذا كان يبدأ بـ postgres://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-app = Client("RamadanBot_Full", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("RamadanBot_Final", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 db_pool = None
+BOT_USERNAME = None
 
-# ================= تهيئة قاعدة البيانات =================
+# --------------------- قاعدة البيانات ---------------------
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
@@ -40,9 +41,8 @@ async def init_db():
                 quality TEXT
             );
         """)
-    print("✅ قاعدة البيانات جاهزة.")
 
-# ================= التحقق من الاشتراك =================
+# --------------------- التحقق من الاشتراك ---------------------
 async def check_subscribe(client, user_id):
     if not PUBLIC_CHANNEL:
         return True
@@ -52,9 +52,9 @@ async def check_subscribe(client, user_id):
     except UserNotParticipant:
         return False
     except:
-        return True
+        return True  # في حال حدوث خطأ فني اسمح له بالمرور
 
-# ================= أمر /start =================
+# --------------------- أوامر المستخدم ---------------------
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user_id = message.from_user.id
@@ -66,22 +66,23 @@ async def start_handler(client, message):
 
     # التحقق من الاشتراك
     if not await check_subscribe(client, user_id):
-        btn = [[InlineKeyboardButton("📢 اشترك بالقناة أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")]]
+        btn = [[InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")]]
         return await message.reply_text(
-            "⚠️ يجب الاشتراك في قناة البوت أولاً.",
+            "⚠️ يجب الاشتراك في القناة أولاً لاستخدام الخدمة.",
             reply_markup=InlineKeyboardMarkup(btn)
         )
 
+    # إذا لم يُرسل ID
     if len(message.command) < 2:
-        return await message.reply_text("أهلاً 👋\nأرسل رقم الحلقة للمشاهدة.")
+        return await message.reply_text(f"أهلاً 👋\nأرسل رابط الحلقة للمشاهدة.")
 
-    # الحصول على رقم الحلقة
+    # محاولة جلب الرقم
     try:
         v_id = int(message.command[1])
     except:
         return await message.reply_text("❌ الرابط غير صحيح.")
 
-    # محاولة جلب بيانات الفيديو من DB
+    # جلب معلومات الفيديو من القاعدة
     video_info = None
     if db_pool:
         async with db_pool.acquire() as conn:
@@ -93,7 +94,6 @@ async def start_handler(client, message):
                    f"⏱ **المدة:** {video_info['duration'] or 'غير معروفة'}\n"
                    f"📺 **الجودة:** {video_info['quality'] or 'HD'}")
 
-    # محاولة نسخ الفيديو مباشرة من القناة (سواء قديم أو مسجل)
     try:
         await client.copy_message(
             chat_id=message.chat.id,
@@ -102,9 +102,9 @@ async def start_handler(client, message):
             caption=caption
         )
     except:
-        await message.reply_text("❌ عذراً، هذه الحلقة غير متوفرة حالياً في القناة.")
+        await message.reply_text("❌ عذراً، هذه الحلقة غير متوفرة حالياً.")
 
-# ================= تسجيل الفيديوهات الجديدة تلقائيًا =================
+# --------------------- تسجيل الفيديوهات ---------------------
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def auto_register_video(client, m):
     duration_sec = m.video.duration if m.video else 0
@@ -125,26 +125,24 @@ async def auto_register_video(client, m):
             )
 
     bot_username = (await client.get_me()).username
-    await m.reply_text(
-        f"✅ تم تسجيل الفيديو!\n🎬 {title}\n⏱ {d_text}\n📺 {quality}\n🔗 https://t.me/{bot_username}?start={m.id}"
-    )
+    await m.reply_text(f"✅ تم تسجيل الفيديو!\n🎬 {title}\n⏱ {d_text}\n📺 {quality}\n🔗 https://t.me/{bot_username}?start={m.id}")
 
-# ================= أمر الإحصائيات =================
+# --------------------- إحصائيات الإدارة ---------------------
 @app.on_message(filters.command("stats") & filters.user(ADMINS))
 async def stats_handler(client, message):
-    if not db_pool:
-        return await message.reply_text("📊 القاعدة غير متصلة حالياً.")
     async with db_pool.acquire() as conn:
         u_count = await conn.fetchval("SELECT COUNT(*) FROM users")
         v_count = await conn.fetchval("SELECT COUNT(*) FROM videos")
-    await message.reply_text(f"📊 الإحصائيات:\n👥 المشتركين: {u_count}\n🎬 الحلقات المسجلة: {v_count}")
+    await message.reply_text(f"📊 **إحصائيات البوت:**\n👥 المشتركين: {u_count}\n🎬 الحلقات: {v_count}")
 
-# ================= التشغيل =================
+# --------------------- التشغيل ---------------------
 async def main():
+    global BOT_USERNAME
     await init_db()
     await app.start()
     me = await app.get_me()
-    print(f"🚀 البوت يعمل تحت @{me.username}")
+    BOT_USERNAME = me.username
+    print(f"🚀 البوت يعمل الآن: @{BOT_USERNAME}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
