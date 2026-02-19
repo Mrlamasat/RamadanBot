@@ -22,7 +22,6 @@ app = Client("MohammedSuperBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT
 def init_db():
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
-    # تأكدنا من نوع البيانات ليكون متوافقاً تماماً
     cursor.execute('''CREATE TABLE IF NOT EXISTS videos 
                       (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
                        poster_path TEXT, poster_id TEXT, status TEXT)''')
@@ -62,16 +61,15 @@ def create_super_poster(base_path, output="final_animation.gif"):
         logging.error(f"Design error: {e}")
         return base_path
 
-# ===== استقبال الميديا =====
+# ===== استقبال الميديا (قناة الرفع) =====
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
     mins, secs = divmod(duration, 60)
     dur_text = f"{mins}:{secs:02d} دقيقة"
-    # تخزين v_id كنص لضمان المطابقة دائماً
     db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)", 
                (str(message.id), dur_text, "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\nأرسل البوستر الآن.")
+    await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\nأرسل البوستر الآن كصورة.")
 
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
@@ -87,7 +85,7 @@ async def receive_poster(client, message):
                                     InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]])
     await message.reply_text(f"📌 تم الربط: {title}\nاختر الجودة للنشر:", reply_markup=markup)
 
-# ===== النشر النهائي =====
+# ===== النشر النهائي للنظام =====
 @app.on_callback_query(filters.regex(r"^q_"))
 async def quality_callback(client, query):
     _, quality, v_id = query.data.split("_")
@@ -116,12 +114,11 @@ async def quality_callback(client, query):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الحلقة الآن", url=link)]])
     )
     db_execute("UPDATE videos SET status = 'posted' WHERE v_id = ?", (v_id,), fetch=False)
-    # تنظيف الملفات (ميزة الكود الأول)
     if os.path.exists(poster_path): os.remove(poster_path)
     if os.path.exists(gif_path): os.remove(gif_path)
     await query.message.delete()
 
-# ===== نظام الـ Start (المعدل والمضمون) =====
+# ===== نظام الـ Start (يدعم القديم والجديد) =====
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     if len(message.command) <= 1:
@@ -129,34 +126,30 @@ async def start_handler(client, message):
         return
 
     v_id = message.command[1]
-    # جلب البيانات للتأكد من وجودها قبل التحقق من الاشتراك
-    video_data = db_execute("SELECT poster_id, title FROM videos WHERE v_id = ?", (v_id,))
     
-    if not video_data:
-        await message.reply_text("❌ عذراً، هذا الرابط غير صالح أو انتهت صلاحيته.")
-        return
-
     try:
-        # التحقق من الاشتراك
+        # 1. التحقق من الاشتراك الإجباري
         await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
         
-        # إرسال الفيديو (الميزة الأساسية)
+        # 2. إرسال الفيديو مباشرة (يعمل مع الفيديوهات القديمة والجديدة)
         await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id))
         
-        # جلب باقي الحلقات
-        poster_id, title = video_data[0]
-        all_ep = db_execute("SELECT v_id FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY v_id ASC", (poster_id,))
-        if len(all_ep) > 1:
-            btns = []
-            row = []
-            bot_username = (await client.get_me()).username
-            for i, ep in enumerate(all_ep, 1):
-                row.append(InlineKeyboardButton(f"الحلقة {i}", url=f"https://t.me/{bot_username}?start={ep[0]}"))
-                if len(row) == 2:
-                    btns.append(row)
-                    row = []
-            if row: btns.append(row)
-            await message.reply_text(f"📺 **باقي حلقات مسلسل {title}:**", reply_markup=InlineKeyboardMarkup(btns))
+        # 3. محاولة جلب باقي الحلقات (للمسجلات في القاعدة فقط)
+        video_data = db_execute("SELECT poster_id, title FROM videos WHERE v_id = ?", (v_id,))
+        if video_data:
+            poster_id, title = video_data[0]
+            all_ep = db_execute("SELECT v_id FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY v_id ASC", (poster_id,))
+            if len(all_ep) > 1:
+                btns = []
+                row = []
+                bot_username = (await client.get_me()).username
+                for i, ep in enumerate(all_ep, 1):
+                    row.append(InlineKeyboardButton(f"الحلقة {i}", url=f"https://t.me/{bot_username}?start={ep[0]}"))
+                    if len(row) == 2:
+                        btns.append(row)
+                        row = []
+                if row: btns.append(row)
+                await message.reply_text(f"📺 **باقي حلقات مسلسل {title}:**", reply_markup=InlineKeyboardMarkup(btns))
 
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك في القناة أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")],
@@ -164,8 +157,9 @@ async def start_handler(client, message):
         await message.reply_text("⚠️ اشترك بالقناة لتفعيل روابط المشاهدة.", reply_markup=InlineKeyboardMarkup(btn))
     except Exception as e:
         logging.error(f"Start Error: {e}")
-        await message.reply_text("❌ حدث خطأ غير متوقع، تأكد أن البوت مشرف بالقناة.")
+        await message.reply_text("❌ عذراً، هذا الفيديو غير متاح حالياً.")
 
+# ===== التحقق من الاشتراك بعد الضغط على الزر =====
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def check_sub(client, query):
     v_id = query.data.split("_")[1]
@@ -173,7 +167,8 @@ async def check_sub(client, query):
         await client.get_chat_member(PUBLIC_CHANNEL, query.from_user.id)
         await query.message.delete()
         await client.copy_message(query.from_user.id, CHANNEL_ID, int(v_id))
+        # ملاحظة: الفيديوهات القديمة لن تظهر تحتها أزرار الحلقات عند الضغط على "تم الاشتراك"
     except:
-        await query.answer("⚠️ اشترك أولاً!", show_alert=True)
+        await query.answer("⚠️ اشترك أولاً في القناة!", show_alert=True)
 
 app.run()
