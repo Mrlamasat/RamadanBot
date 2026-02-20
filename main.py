@@ -4,7 +4,7 @@ import logging
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant, FloodWait
+from pyrogram.errors import UserNotParticipant, FloodWait, PeerIdInvalid
 
 # ===== إعدادات التسجيل =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -54,7 +54,7 @@ async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
     db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)", 
                (str(message.id), format_duration(duration), "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم ربط الفيديو {message.id}\n🖼 أرسل البوستر الأصلي الآن.")
+    await message.reply_text(f"✅ تم ربط الفيديو {message.id}\n🖼 أرسل البوستر الأصلي.")
 
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
@@ -91,21 +91,22 @@ async def quality_callback(client, query):
     await query.message.delete()
     await query.answer("✅ تم النشر!", show_alert=True)
 
-# ===== أمر الإصلاح النهائي (حل مشكلة GetHistory) =====
+# ===== أمر الإصلاح (النسخة المصححة بدون خطأ 'value') =====
 @app.on_message(filters.command("fix_old_data") & filters.private)
 async def fix_old_data(client, message):
-    msg_wait = await message.reply_text("🚀 جاري فحص القناة باستخدام محرك البحث لتجاوز قيود تليجرام...")
+    msg_wait = await message.reply_text("🚀 جاري بدء الفحص الذكي وتجاوز قيود تليجرام...")
     count_linked, count_videos = 0, 0
     
     try:
-        # استخدام البحث بدلاً من جلب السجل الكامل
+        # محاولة تنشيط القناة أولاً
+        await client.get_chat(CHANNEL_ID)
+
         async for vid_msg in client.search_messages(CHANNEL_ID, filter="video"):
             try:
                 v_id = str(vid_msg.id)
                 db_execute("INSERT OR IGNORE INTO videos (v_id, status) VALUES (?, ?)", (v_id, "posted"), fetch=False)
                 count_videos += 1
 
-                # البحث عن البوستر (الصورة) قبل الفيديو بـ 50 رسالة
                 async for search_msg in client.get_chat_history(CHANNEL_ID, limit=50, offset_id=vid_msg.id):
                     if search_msg.photo and not getattr(search_msg.photo, "animation", False):
                         p = search_msg.photo
@@ -117,13 +118,18 @@ async def fix_old_data(client, message):
                 if count_videos % 20 == 0:
                     try: await msg_wait.edit(f"⏳ جاري الربط...\n🎬 تم العثور على {count_videos} فيديو\n🖼 تم ربط {count_linked} بوستر")
                     except: pass
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-            except: continue
+            
+            except FloodWait as fw:
+                await asyncio.sleep(fw.x) # في Pyrogram الحديثة نستخدم .x للثواني
+            except Exception:
+                continue
 
-        await msg_wait.edit(f"🏁 **اكتمل الإصلاح!**\n🎬 فيديوهات: `{count_videos}`\n🖼 بوسترات مربوطة: `{count_linked}`")
+        await msg_wait.edit(f"🏁 **اكتمل الإصلاح بنجاح!**\n🎬 فيديوهات: `{count_videos}`\n🖼 بوسترات مربوطة: `{count_linked}`")
+    
+    except PeerIdInvalid:
+        await msg_wait.edit("❌ خطأ: الـ ID غير معروف للبوت. قم بتوجيه رسالة من القناة للبوت أولاً.")
     except Exception as e:
-        await msg_wait.edit(f"❌ خطأ:\n`{str(e)}`")
+        await msg_wait.edit(f"❌ حدث خطأ غير متوقع:\n`{str(e)}` \nتأكد أن الـ ID يبدأ بـ -100")
 
 # ===== نظام Start والعرض بالحلقات =====
 @app.on_message(filters.command("start") & filters.private)
@@ -152,12 +158,12 @@ async def start_handler(client, message):
                     row.append(InlineKeyboardButton(label, url=f"https://t.me/{(await client.get_me()).username}?start={vid}"))
                     if len(row) == 5: btns.append(row); row = []
                 if row: btns.append(row)
-                await message.reply_text("📺 باقي الحلقات:", reply_markup=InlineKeyboardMarkup(btns))
+                await message.reply_text("📺 باقي حلقات المسلسل:", reply_markup=InlineKeyboardMarkup(btns))
 
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك بالقناة", url=f"https://t.me/{PUBLIC_CHANNEL}")],
                [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
-        await message.reply_text("⚠️ يجب الاشتراك أولاً.", reply_markup=InlineKeyboardMarkup(btn))
+        await message.reply_text("⚠️ يجب الاشتراك أولاً للمشاهدة.", reply_markup=InlineKeyboardMarkup(btn))
 
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def check_sub(client, query):
