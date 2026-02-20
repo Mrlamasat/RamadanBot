@@ -1,19 +1,16 @@
 import os
 import sqlite3
-import logging
 import uuid
 from datetime import timedelta
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import UserNotParticipant
 
 # ===== الإعدادات =====
-logging.basicConfig(level=logging.INFO)
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
-PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "").replace("@", "")
+PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "")
 
 app = Client("MohammedSmartBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -24,14 +21,7 @@ def db_query(q, p=(), fetch=True):
         if fetch: return cur.fetchall()
         conn.commit()
 
-def init_db():
-    db_query("""CREATE TABLE IF NOT EXISTS videos 
-                (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
-                 poster_id TEXT, status TEXT, ep_num INTEGER, series_tag TEXT)""", fetch=False)
-    db_query("""CREATE TABLE IF NOT EXISTS subscriptions 
-                (user_id INTEGER, series_tag TEXT, UNIQUE(user_id, series_tag))""", fetch=False)
-init_db()
-
+# حالة الرفع الحالية (تخزين مؤقت)
 current_upload = {}
 
 # =========================
@@ -41,120 +31,109 @@ current_upload = {}
 async def receive_video(client, message):
     duration_sec = message.video.duration if message.video else getattr(message.document, "duration", 0)
     duration = str(timedelta(seconds=duration_sec)) if duration_sec else "غير معروف"
-    
+
     current_upload.clear()
-    current_upload.update({"v_id": str(message.id), "duration": duration})
-    
-    await message.reply_text(f"✅ تم استلام الفيديو\n⏱ المدة: {duration}\n🖼 **أرسل البوستر الآن:**", quote=True)
+    current_upload.update({
+        "v_id": str(message.id),
+        "duration": duration,
+        "step": "WAIT_POSTER"
+    })
+    await message.reply_text(f"✅ تم استلام الفيديو.\n⏱ المدة: {duration}\n🖼 **أرسل البوستر الآن:**", quote=True)
 
 # =========================
-# 2️⃣ استلام البوستر + العنوان الاختياري
+# 2️⃣ استلام البوستر + خيار العنوان
 # =========================
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
-    if "v_id" not in current_upload: return
-    
+    if current_upload.get("step") != "WAIT_POSTER": return
+
     current_upload.update({
         "poster": message.photo.file_id,
         "series_tag": str(uuid.uuid4())[:8],
-        "default_title": message.caption or "حلقة جديدة"
+        "default_title": message.caption or "حلقة جديدة",
+        "step": "WAIT_TITLE_CHOICE"
     })
-    
-    btns = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ استخدام وصف الصورة", callback_data="set_title_old")],
-        [InlineKeyboardButton("✏️ كتابة عنوان جديد", callback_data="set_title_new")]
-    ])
-    await message.reply_text("🖼 تم حفظ البوستر. كيف تود وضع العنوان؟", reply_markup=btns, quote=True)
 
-@app.on_callback_query(filters.regex("^set_title_"))
-async def title_choice(client, query):
-    if query.data.endswith("old"):
-        current_upload["title"] = current_upload["default_title"]
-        await query.message.edit_text(f"📝 العنوان: {current_upload['title']}\n🔢 **أرسل رقم الحلقة الآن:**")
-    else:
-        current_upload["wait_title"] = True
-        await query.message.edit_text("📝 **أرسل العنوان الجديد الآن:**")
+    btns = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ استخدام وصف الصورة", callback_data="t_old")],
+        [InlineKeyboardButton("✏️ كتابة عنوان جديد", callback_data="t_new")]
+    ])
+    await message.reply_text("🖼 تم حفظ البوستر. اختر العنوان:", reply_markup=btns, quote=True)
 
 # =========================
-# 3️⃣ استلام النص (عنوان أو رقم)
+# 3️⃣ معالجة العنوان (اختيار قديم أو كتابة جديد)
+# =========================
+@app.on_callback_query(filters.regex("^t_"))
+async def handle_title(client, query: CallbackQuery):
+    if query.data == "t_old":
+        current_upload.update({"title": current_upload["default_title"], "step": "WAIT_EP"})
+        await query.message.edit_text(f"📝 العنوان المعتمد: {current_upload['title']}\n🔢 **أرسل رقم الحلقة الآن:**")
+    else:
+        current_upload["step"] = "WAIT_TEXT_TITLE"
+        await query.message.edit_text("📝 **أرسل العنوان الجديد كرسالة نصية:**")
+
+# =========================
+# 4️⃣ استلام النصوص (عنوان جديد أو رقم حلقة)
 # =========================
 @app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start"]))
 async def handle_text(client, message):
-    if current_upload.get("wait_title"):
-        current_upload.update({"title": message.text, "wait_title": False})
-        await message.reply_text(f"✅ تم اعتماد العنوان: {message.text}\n🔢 **أرسل رقم الحلقة:**", quote=True)
+    # إذا كنا ننتظر العنوان الجديد
+    if current_upload.get("step") == "WAIT_TEXT_TITLE":
+        current_upload.update({"title": message.text, "step": "WAIT_EP"})
+        await message.reply_text(f"✅ العنوان: {message.text}\n🔢 **أرسل الآن رقم الحلقة:**", quote=True)
         return
 
-    if "poster" in current_upload and message.text.isdigit():
-        current_upload["ep"] = int(message.text)
+    # إذا كنا ننتظر رقم الحلقة (هذا هو الشرط ما قبل الأخير)
+    if current_upload.get("step") == "WAIT_EP":
+        if not message.text.isdigit():
+            await message.reply_text("❌ أرسل رقم الحلقة كأرقام فقط.")
+            return
+        
+        current_upload.update({"ep": int(message.text), "step": "WAIT_QUALITY"})
+        
+        # إظهار أزرار الجودة (بدون نشر)
         btns = InlineKeyboardMarkup([
-            [InlineKeyboardButton("HD", callback_data="pub_HD"),
-             InlineKeyboardButton("SD", callback_data="pub_SD"),
-             InlineKeyboardButton("4K", callback_data="pub_4K")]
+            [InlineKeyboardButton("HD", callback_data="q_HD"),
+             InlineKeyboardButton("SD", callback_data="q_SD"),
+             InlineKeyboardButton("4K", callback_data="q_4K")]
         ])
-        await message.reply_text("✨ اختر الجودة للنشر النهائي:", reply_markup=btns, quote=True)
+        await message.reply_text(f"🔢 الحلقة {message.text} جاهزة.\n⚠️ **حدد الجودة الآن ليتم النشر فوراً:**", reply_markup=btns, quote=True)
 
 # =========================
-# 4️⃣ النشر الفعلي والإشعارات
+# 5️⃣ اختيار الجودة + النشر التلقائي (الخاتمة)
 # =========================
-@app.on_callback_query(filters.regex("^pub_"))
-async def finalize(client, query):
-    quality = query.data.split("_")[1]
-    v_id, poster, ep, dur, tag, title = (current_upload.get(k) for k in ["v_id", "poster", "ep", "duration", "series_tag", "title"])
-    
-    db_query("INSERT INTO videos VALUES (?, ?, ?, ?, ?, ?, ?)", (v_id, dur, title, poster, "posted", ep, tag), fetch=False)
-    
-    link = f"https://t.me/{(await client.get_me()).username}?start={v_id}"
-    caption = f"🎬 **{title}**\n🔹 الحلقة: {ep}\n✨ الجودة: {quality}\n⏱ المدة: {dur}\n\n📥 [مشاهدة الآن]({link})"
-    
-    # النشر في القناة العامة
-    await client.send_photo(PUBLIC_CHANNEL, photo=poster, caption=caption, 
-                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الآن", url=link)]]))
-    
-    # إرسال إشعارات للمشتركين السابقين في هذا المسلسل
-    subs = db_query("SELECT user_id FROM subscriptions WHERE series_tag = ?", (tag,))
-    for sub_id in subs:
-        try: await client.send_message(sub_id[0], f"🔔 حلقة جديدة من **{title}** جُهزت!\n📥 [اضغط للمشاهدة]({link})")
-        except: pass
-        
-    await query.message.edit_text("🚀 تم النشر وإرسال الإشعارات!")
-    current_upload.clear()
-
-# =========================
-# 5️⃣ نظام Start والاشتراك الإجباري
-# =========================
-@app.on_message(filters.command("start") & filters.private)
-async def start_handler(client, message):
-    if len(message.command) <= 1:
-        await message.reply_text("أهلاً بك يا محمد! أرسل الرابط للمشاهدة.")
+@app.on_callback_query(filters.regex("^q_"))
+async def handle_quality_and_publish(client, query: CallbackQuery):
+    if current_upload.get("step") != "WAIT_QUALITY":
+        await query.answer("⚠️ أكمل البيانات أولاً!", show_alert=True)
         return
 
-    v_id = message.command[1]
+    quality = query.data.split("_")[1]
+    v_id = current_upload["v_id"]
+    poster = current_upload["poster"]
+    ep = current_upload["ep"]
+    dur = current_upload["duration"]
+    tag = current_upload["series_tag"]
+    title = current_upload["title"]
+
+    # 1. حفظ البيانات في القاعدة
+    db_query("INSERT INTO videos (v_id, duration, title, poster_id, status, ep_num, series_tag) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+             (v_id, dur, title, poster, "posted", ep, tag), fetch=False)
+
+    watch_link = f"https://t.me/{(await client.get_me()).username}?start={v_id}"
+    caption = f"🎬 **{title}**\n🔹 الحلقة: {ep}\n✨ الجودة: {quality}\n⏱ المدة: {dur}\n\n📥 [مشاهدة الآن]({watch_link})"
+
     try:
-        await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
-        
-        # إرسال الفيديو
-        await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id), protect_content=True)
-        
-        # جلب بيانات المسلسل لعرض الحلقات وتسجيل الاشتراك
-        data = db_query("SELECT series_tag, title FROM videos WHERE v_id = ?", (v_id,))
-        if data:
-            tag, title = data[0]
-            db_query("INSERT OR IGNORE INTO subscriptions VALUES (?, ?)", (message.from_user.id, tag), fetch=False)
-            
-            all_eps = db_query("SELECT v_id, ep_num FROM videos WHERE series_tag = ? ORDER BY ep_num ASC", (tag,))
-            if len(all_eps) > 1:
-                btns = []
-                row = []
-                for vid, num in all_eps:
-                    label = f"▶️ {num}" if vid == v_id else f"{num}"
-                    row.append(InlineKeyboardButton(label, url=f"https://t.me/{(await client.get_me()).username}?start={vid}"))
-                    if len(row) == 4: btns.append(row); row = []
-                if row: btns.append(row)
-                await message.reply_text(f"📺 حلقات مسلسل **{title}**:", reply_markup=InlineKeyboardMarkup(btns))
-                
-    except UserNotParticipant:
-        await message.reply_text(f"⚠️ اشترك أولاً في @{PUBLIC_CHANNEL} لتفعيل الرابط.", 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 اشترك الآن", url=f"https://t.me/{PUBLIC_CHANNEL}")]]))
+        # 2. النشر الفعلي في القناة العامة
+        await client.send_photo(
+            chat_id=PUBLIC_CHANNEL,
+            photo=poster,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ فتح الحلقة الآن", url=watch_link)]])
+        )
+        await query.message.edit_text(f"🚀 تم النشر بنجاح بجودة {quality}!")
+        current_upload.clear() # تصفير الحالة لاستقبال عملية جديدة
+    except Exception as e:
+        await query.message.edit_text(f"❌ خطأ في النشر: {e}")
 
 app.run()
