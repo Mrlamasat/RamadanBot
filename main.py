@@ -1,39 +1,85 @@
+import os
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-import os
 
-# --- إعدادات النظام ---
-DEFAULT_QUALITY = "HD"
-qualities = ["HD", "SD", "4K"]
-data_store = {} 
+# --- الإعدادات (تأكد من وضعها في Railway/Heroku) ---
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+# معرف القناة التي سترسل لها البوست النهائي (مثال: @MyChannel أو -100123456)
+PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "")
 
-app = Client("my_bot", 
-             api_id=int(os.environ.get("API_ID", 0)), 
-             api_hash=os.environ.get("API_HASH", ""), 
-             bot_token=os.environ.get("BOT_TOKEN", ""))
+app = Client("SmartBotV2", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- دالة إنشاء أزرار الجودة ---
-def create_quality_buttons(v_id: int, default_quality=DEFAULT_QUALITY):
-    buttons = [
-        [InlineKeyboardButton(
-            f"✨ {q} (افتراضي)" if q == default_quality else q,
-            callback_data=f"q_{q}_{v_id}"
-        )] for q in qualities
-    ]
-    buttons.append([InlineKeyboardButton("❌ إلغاء العملية", callback_data=f"cancel_{v_id}")])
-    return InlineKeyboardMarkup(buttons)
+# مخزن مؤقت (يفضل استبداله بـ Redis أو MongoDB مستقبلاً)
+data_store = {}
 
-# --- معالجة اختيار الجودة والنشر ---
-@app.on_callback_query(filters.regex("^q_"))
-async def on_quality_selected(c, q):
-    data_parts = q.data.split("_")
-    # إذا كانت الجودة فارغة في الكولباك، يستخدم HD تلقائياً
-    qual = data_parts[1] if len(data_parts) > 1 and data_parts[1] != "" else DEFAULT_QUALITY
-    r_id = int(data_parts[2])
+@app.on_message(filters.command("start") & filters.private)
+async def start_handler(c, m):
+    # إذا كان الرابط يحتوي على ID فيديو (مثل: t.me/bot?start=123)
+    if len(m.command) > 1:
+        v_id = int(m.command[1])
+        try:
+            # إرسال الفيديو للمستخدم من القناة المصدر (يجب أن يكون البوت آدمن هناك)
+            await c.copy_message(chat_id=m.chat.id, from_chat_id=m.chat.id, message_id=v_id)
+        except Exception as e:
+            await m.reply_text(f"❌ خطأ: لم أتمكن من العثور على الفيديو. {e}")
+    else:
+        await m.reply_text(f"أهلاً بك يا محمد، أرسل لي الفيديو هنا لضبط النشر.")
 
+# 1. استلام الفيديو (أرسل الفيديو للبوت في الخاص مباشرة)
+@app.on_message(filters.private & (filters.video | filters.document))
+async def on_video(c, m):
+    v_id = m.id
+    msg = await m.reply_text(
+        "✅ تم استلام الفيديو.\n"
+        "🖼 **الآن قم بعمل (Reply) رد على هذه الرسالة وأرسل صورة البوستر مع الوصف.**",
+        quote=True
+    )
+    data_store[msg.id] = {"v_id": v_id}
+
+# 2. استلام البوستر والنشر النهائي
+@app.on_message(filters.private & filters.photo & filters.reply)
+async def on_poster(c, m):
+    r_id = m.reply_to_message.id
     if r_id in data_store:
-        d = data_store[r_id]
-        bot_info = await c.get_me()
+        p_id = m.photo.file_id
+        caption = m.caption or "حلقة جديدة"
+        v_id = data_store[r_id]["v_id"]
+        
+        bot = await c.get_me()
+        # إنشاء رابط المشاهدة الذي سيعمل في البوت
+        watch_link = f"https://t.me/{bot.username}?start={v_id}"
+        
+        final_caption = (
+            f"🎬 {caption}\n\n"
+            f"✨ الجودة: HD\n"
+            f"📥 اضغط الزر لمشاهدة الحلقة"
+        )
+        
+        # الأزرار
+        btns = InlineKeyboardMarkup([[
+            InlineKeyboardButton("▶️ مشاهدة الآن", url=watch_link)
+        ]])
+        
+        try:
+            # النشر في القناة العامة
+            await c.send_photo(
+                chat_id=PUBLIC_CHANNEL,
+                photo=p_id,
+                caption=final_caption,
+                reply_markup=btns
+            )
+            await m.reply_text("🚀 تم النشر بنجاح في القناة!")
+            data_store.pop(r_id) # تنظيف الذاكرة
+        except Exception as e:
+            await m.reply_text(f"❌ فشل النشر: {e}")
+    else:
+        await m.reply_text("❌ لم أتعرف على هذا الفيديو. ابدأ العملية من جديد.")
+
+print("✅ البوت المطور يعمل الآن...")
+app.run()
         link = f"https://t.me/{bot_info.username}?start={d['v_id']}"
 
         caption = (
