@@ -4,7 +4,6 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant
-from PIL import Image
 
 # ===== إعدادات التسجيل =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,13 +17,21 @@ PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "").replace("@", "")
 
 app = Client("MohammedSmartBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ===== قاعدة البيانات =====
+# ===== قاعدة البيانات (تحديث ذكي) =====
 def init_db():
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS videos 
                       (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
-                       poster_path TEXT, poster_id TEXT, status TEXT)''')
+                       poster_id TEXT, status TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriptions 
+                      (user_id INTEGER, poster_id TEXT, UNIQUE(user_id, poster_id))''')
+    
+    cursor.execute("PRAGMA table_info(videos)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "ep_num" not in columns:
+        cursor.execute("ALTER TABLE videos ADD COLUMN ep_num INTEGER")
+        logging.info("✅ تم إضافة عمود ep_num بنجاح.")
     conn.commit()
     conn.close()
 
@@ -44,33 +51,11 @@ def format_duration(seconds):
     mins, secs = divmod(seconds, 60)
     return f"{mins}:{secs:02d} دقيقة"
 
-# ===== دوال التصميم =====
-def create_super_poster(base_path, output="final_animation.gif"):
-    try:
-        base = Image.open(base_path).convert("RGBA")
-        width, height = base.size
-        btn_src = Image.open("play_button.png").convert("RGBA")
-        btn_w = int(width * 0.22)
-        btn_h = int(btn_src.height * (btn_w / btn_src.width))
-        frames = []
-        scales = [1.0, 1.05, 1.1, 1.05, 1.0]
-        for scale in scales:
-            temp = base.copy()
-            w_p, h_p = int(btn_w * scale), int(btn_h * scale)
-            btn_resized = btn_src.resize((w_p, h_p), Image.Resampling.LANCZOS)
-            temp.paste(btn_resized, ((width - w_p)//2, (height - h_p)//2), btn_resized)
-            frames.append(temp.convert("P", palette=Image.Palette.ADAPTIVE))
-        frames[0].save(output, save_all=True, append_images=frames[1:], duration=150, loop=0, optimize=False)
-        return output
-    except Exception as e:
-        logging.error(f"Design error: {e}")
-        return base_path
-
-# ===== استقبال ونشر المحتوى =====
+# ===== استقبال المحتوى (نظام الربط) =====
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
-    db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)", 
+    db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)",
                (str(message.id), format_duration(duration), "waiting"), fetch=False)
     await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\nأرسل البوستر الآن.")
 
@@ -79,86 +64,118 @@ async def receive_poster(client, message):
     res = db_execute("SELECT v_id FROM videos WHERE status = 'waiting' ORDER BY rowid DESC LIMIT 1")
     if not res: return
     v_id = res[0][0]
-    path = await message.download()
-    title = message.caption or "حلقة جديدة"
-    db_execute("UPDATE videos SET poster_path = ?, title = ?, poster_id = ? WHERE v_id = ?", 
-               (path, title, message.photo.file_unique_id, v_id), fetch=False)
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("HD", callback_data=f"q_HD_{v_id}"),
-                                    InlineKeyboardButton("SD", callback_data=f"q_SD_{v_id}"),
-                                    InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]])
-    await message.reply_text(f"📌 تم الربط: {title}\nاختر الجودة:", reply_markup=markup)
+    db_execute("UPDATE videos SET title = ?, poster_id = ?, status = 'awaiting_ep' WHERE v_id = ?",
+               (message.caption or "حلقة جديدة", message.photo.file_id, v_id), fetch=False)
+    await message.reply_text(f"📌 تم استلام البوستر.\n🔢 أرسل الآن رقم الحلقة (أرقام فقط):")
+
+@app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start", "edit", "list"]))
+async def receive_ep_number(client, message):
+    res = db_execute("SELECT v_id FROM videos WHERE status = 'awaiting_ep' ORDER BY rowid DESC LIMIT 1")
+    if not res or not message.text.isdigit(): return
+    
+    v_id = res[0][0]
+    db_execute("UPDATE videos SET ep_num = ?, status = 'ready_quality' WHERE v_id = ?", (int(message.text), v_id), fetch=False)
+    
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("HD", callback_data=f"q_HD_{v_id}"),
+         InlineKeyboardButton("SD", callback_data=f"q_SD_{v_id}"),
+         InlineKeyboardButton("4K", callback_data=f"q_4K_{v_id}")]
+    ])
+    await message.reply_text(f"✅ تم حفظ الحلقة رقم: {message.text}\nاختر الجودة للنشر في القناة:", reply_markup=markup)
 
 @app.on_callback_query(filters.regex(r"^q_"))
 async def quality_callback(client, query):
     _, quality, v_id = query.data.split("_")
-    res = db_execute("SELECT duration, title, poster_path FROM videos WHERE v_id = ?", (v_id,))
+    res = db_execute("SELECT duration, title, poster_id FROM videos WHERE v_id = ?", (v_id,))
     if not res: return
-    duration, title, poster_path = res[0]
-    gif_path = create_super_poster(poster_path)
+    duration, title, p_id = res[0]
+    
     bot_info = await client.get_me()
     link = f"https://t.me/{bot_info.username}?start={v_id}"
-    await client.send_animation(CHANNEL_ID, animation=gif_path, caption=f"🎬 **{title}**\n⏱ المـدة: {duration}\n✨ الجـودة: {quality}\n\n📥 [مشاهدة الآن]({link})",
-                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الآن", url=link)]]))
+    
+    await client.send_photo(CHANNEL_ID, photo=p_id,
+                           caption=f"🎬 **حلقة جديدة جاهزة**\n⏱ المدة: {duration}\n✨ الجودة: {quality}\n\n📥 [مشاهدة الآن]({link})",
+                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الآن", url=link)]]))
+    
     db_execute("UPDATE videos SET status = 'posted' WHERE v_id = ?", (v_id,), fetch=False)
-    if os.path.exists(poster_path): os.remove(poster_path)
-    if os.path.exists(gif_path): os.remove(gif_path)
+    
+    # إشعارات المشتركين
+    subscribers = db_execute("SELECT user_id FROM subscriptions WHERE poster_id = ?", (p_id,))
+    for sub in subscribers:
+        try:
+            await client.send_message(sub[0], f"🔔 **تحديث جديد!**\nتم إضافة حلقة جديدة للمسلسل الذي تتابعه 🎬.\n📥 [اضغط هنا للمشاهدة الآن]({link})", disable_web_page_preview=True)
+        except: pass
     await query.message.delete()
 
-# ===== نظام الـ Start (المنطق الذي أرسلته) =====
+# ===== نظام الـ Start (يدعم القديم والجديد) =====
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     if len(message.command) <= 1:
-        await message.reply_text("أهلاً بك يا محمد!")
+        await message.reply_text(f"أهلاً بك يا {message.from_user.first_name}!")
         return
 
     v_id = message.command[1]
     try:
         await client.get_chat_member(PUBLIC_CHANNEL, message.from_user.id)
         
-        # التأكد أن الرسالة موجودة في القناة
         try:
             channel_msg = await client.get_messages(CHANNEL_ID, int(v_id))
             if not channel_msg or channel_msg.empty:
-                await message.reply_text("❌ الفيديو غير موجود أو تم حذفه.")
+                await message.reply_text("❌ الفيديو غير موجود.")
                 return
         except:
-            await message.reply_text("❌ الفيديو غير موجود.")
+            await message.reply_text("❌ خطأ في الوصول للفيديو.")
             return
 
-        video_data = db_execute("SELECT poster_id, title FROM videos WHERE v_id = ?", (v_id,))
+        video_data = db_execute("SELECT poster_id, title, ep_num FROM videos WHERE v_id = ?", (v_id,))
 
-        # تسجيل تلقائي للفيديوهات القديمة
+        # منطق التسجيل التلقائي للفيديوهات القديمة
         if not video_data:
             duration = format_duration(channel_msg.video.duration) if channel_msg.video else "غير معروف"
             db_execute("INSERT OR IGNORE INTO videos (v_id, duration, title, status) VALUES (?, ?, ?, ?)",
-                       (v_id, duration, "فيديو قديم", "legacy"), fetch=False)
-            video_data = db_execute("SELECT poster_id, title FROM videos WHERE v_id = ?", (v_id,))
+                       (v_id, duration, "فيديو قديم", "posted"), fetch=False)
+            video_data = db_execute("SELECT poster_id, title, ep_num FROM videos WHERE v_id = ?", (v_id,))
 
-        # نسخ الفيديو
-        await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id))
+        # إرسال الفيديو (محمي من الحفظ/التحويل)
+        await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id), protect_content=True)
 
-        # عرض باقي الحلقات
+        # عرض قائمة الحلقات
         if video_data and video_data[0][0]:
-            poster_id, title = video_data[0]
-            all_ep = db_execute("SELECT v_id FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY v_id ASC", (poster_id,))
+            p_id, title, ep_num = video_data[0]
+            db_execute("INSERT OR IGNORE INTO subscriptions (user_id, poster_id) VALUES (?, ?)", (message.from_user.id, p_id), fetch=False)
+
+            all_ep = db_execute("SELECT v_id, ep_num FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY COALESCE(ep_num, rowid) ASC", (p_id,))
+            
             if len(all_ep) > 1:
-                btns = []
-                row = []
+                btns = []; row = []
                 bot_info = await client.get_me()
-                for i, ep in enumerate(all_ep, 1):
-                    row.append(InlineKeyboardButton(f"الحلقة {i}", url=f"https://t.me/{bot_info.username}?start={ep[0]}"))
-                    if len(row) == 2:
-                        btns.append(row); row = []
+                for i, (v_id_item, num) in enumerate(all_ep, 1):
+                    display_num = num if num else i
+                    label = f"▶️ الحلقة {display_num}" if v_id_item == v_id else f"الحلقة {display_num}"
+                    row.append(InlineKeyboardButton(label, url=f"https://t.me/{bot_info.username}?start={v_id_item}"))
+                    if len(row) == 2: btns.append(row); row = []
                 if row: btns.append(row)
-                await message.reply_text(f"📺 **باقي حلقات مسلسل {video_data[0][1]}:**", reply_markup=InlineKeyboardMarkup(btns))
+
+                msg_text = "📺 شاهد المزيد من الحلقات:" if len(all_ep) > 10 else "📺 باقي حلقات المسلسل:"
+                await message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(btns))
 
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك أولاً", url=f"https://t.me/{PUBLIC_CHANNEL}")],
                [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
         await message.reply_text("⚠️ اشترك بالقناة لتفعيل الرابط.", reply_markup=InlineKeyboardMarkup(btn))
-    except Exception as e:
-        logging.error(f"Start error: {e}")
-        await message.reply_text("❌ حدث خطأ.")
+
+# ===== الأوامر الإدارية =====
+@app.on_message(filters.command("edit") & filters.private)
+async def edit_title(client, message):
+    if len(message.command) < 3: return
+    if message.command[1].lower() == "all":
+        res = db_execute("SELECT poster_id FROM videos WHERE v_id = ?", (message.command[2],))
+        if res:
+            db_execute("UPDATE videos SET title = ? WHERE poster_id = ?", (" ".join(message.command[3:]), res[0][0]), fetch=False)
+            await message.reply_text("✅ تم تحديث اسم المسلسل لجميع الحلقات.")
+    else:
+        db_execute("UPDATE videos SET title = ? WHERE v_id = ?", (" ".join(message.command[2:]), message.command[1]), fetch=False)
+        await message.reply_text("✅ تم تحديث العنوان.")
 
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def check_sub(client, query):
@@ -166,7 +183,7 @@ async def check_sub(client, query):
     try:
         await client.get_chat_member(PUBLIC_CHANNEL, query.from_user.id)
         await query.message.delete()
-        await client.copy_message(query.from_user.id, CHANNEL_ID, int(v_id))
+        await client.copy_message(query.from_user.id, CHANNEL_ID, int(v_id), protect_content=True)
     except:
         await query.answer("⚠️ اشترك أولاً!", show_alert=True)
 
