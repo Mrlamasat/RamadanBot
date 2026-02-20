@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import uuid
 from datetime import timedelta
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -33,6 +34,7 @@ db_query("""CREATE TABLE IF NOT EXISTS videos (
     title TEXT
 )""", fetch=False)
 
+# قاموس الجلسات لتخزين البيانات مؤقتاً
 sessions = {}
 
 # =========================
@@ -48,6 +50,8 @@ async def receive_video(client, message):
 
     duration = str(timedelta(seconds=duration_sec)) if duration_sec else "غير معروف"
     v_id = str(message.id)
+    
+    # بدء الجلسة وربطها بـ ID الرسالة
     sessions[v_id] = {
         "v_id": v_id,
         "duration": duration,
@@ -55,58 +59,75 @@ async def receive_video(client, message):
     }
 
     await message.reply_text(
-        f"✅ تم استلام الفيديو.\n⏱ المدة: {duration}\n👈 الآن أرسل البوستر.",
+        f"✅ تم استلام الفيديو.\n⏱ المدة: {duration}\n👈 **يرجى الرد (Reply) على هذه الرسالة بالبوستر.**",
         quote=True
     )
 
 # =========================
-# 2️⃣ استلام البوستر
+# 2️⃣ استلام البوستر (يجب الرد على رسالة البوت)
 # =========================
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
-    v_id = str(message.reply_to_message.id) if message.reply_to_message else None
-    session = sessions.get(v_id)
-    if not session or session.get("step") != "WAIT_POSTER":
+    # الحصول على ID الرسالة الأصلية التي تم الرد عليها
+    reply_to_id = str(message.reply_to_message.reply_to_message.id) if message.reply_to_message and message.reply_to_message.reply_to_message else None
+    
+    # محاولة جلب الجلسة عبر الرد المباشر أو غير المباشر
+    v_id = None
+    for sid in sessions:
+        if message.reply_to_message and str(message.reply_to_message.id) in str(sessions[sid].get("last_msg_id", "")):
+            v_id = sid
+            break
+    
+    # إذا لم نجدها، نستخدم المنطق الافتراضي للرد
+    if not v_id and message.reply_to_message:
+        # نبحث في الجلسات عن الجلسة التي تنتظر بوستر
+        for sid, sess in sessions.items():
+            if sess["step"] == "WAIT_POSTER":
+                v_id = sid
+                break
+
+    if not v_id or sessions[v_id]["step"] != "WAIT_POSTER":
         return
 
-    # استخدم caption كعنوان إذا كتبته، وإلا فارغ
+    # حفظ العنوان إذا وُجد في وصف الصورة
     title = message.caption if message.caption else ""
 
-    session.update({
+    sessions[v_id].update({
         "poster": message.photo.file_id,
-        "series_tag": str(v_id),
-        "title": title,   # العنوان من caption أو فارغ
+        "title": title,
         "step": "WAIT_EP_NUM"
     })
 
-    await message.reply_text(
-        "🖼 تم حفظ البوستر.\n👈 أرسل رقم الحلقة (أرقام فقط).",
+    sent_msg = await message.reply_text(
+        f"🖼 تم حفظ البوستر.\n📝 العنوان الحالي: {title if title else 'بدون عنوان'}\n👈 **الآن قم بالرد على هذه الرسالة برقم الحلقة:**",
         quote=True
     )
+    sessions[v_id]["last_msg_id"] = sent_msg.id
 
 # =========================
 # 3️⃣ استلام رقم الحلقة
 # =========================
 @app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start"]))
 async def handle_episode_number(client, message):
-    v_id = str(message.reply_to_message.id) if message.reply_to_message else None
-    session = sessions.get(v_id)
-    if not session or session.get("step") != "WAIT_EP_NUM":
+    v_id = None
+    for sid, sess in sessions.items():
+        if sess["step"] == "WAIT_EP_NUM":
+            v_id = sid
+            break
+            
+    if not v_id or not message.text.isdigit():
         return
 
-    if not message.text.isdigit():
-        await message.reply_text("❌ يرجى إرسال رقم الحلقة فقط (أرقام).")
-        return
-
-    session.update({"ep": int(message.text), "step": "WAIT_QUALITY_CLICK"})
+    sessions[v_id].update({"ep": int(message.text), "step": "WAIT_QUALITY_CLICK"})
 
     btns = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 HD", callback_data=f"final_HD|{v_id}"),
          InlineKeyboardButton("📺 SD", callback_data=f"final_SD|{v_id}"),
          InlineKeyboardButton("🔥 4K", callback_data=f"final_4K|{v_id}")]
     ])
+    
     await message.reply_text(
-        f"🔢 الحلقة رقم: {message.text}\n⚠️ اختر الآن الجودة المطلوبة:",
+        f"🔢 الحلقة رقم: {message.text}\n⚠️ **اختر الجودة الآن ليتم النشر:**",
         reply_markup=btns, quote=True
     )
 
@@ -115,33 +136,35 @@ async def handle_episode_number(client, message):
 # =========================
 @app.on_callback_query(filters.regex("^final_"))
 async def finalize_and_post(client, query: CallbackQuery):
-    await query.answer()
-    data, v_id = query.data.split("|")
+    data_parts = query.data.split("|")
+    quality_part = data_parts[0].split("_")[1]
+    v_id = data_parts[1]
+    
     session = sessions.get(v_id)
     if not session or session.get("step") != "WAIT_QUALITY_CLICK":
-        await query.answer("⚠️ البيانات غير مكتملة!", show_alert=True)
+        await query.answer("⚠️ البيانات منتهية الصلاحية!", show_alert=True)
         return
 
-    quality = data.split("_")[1]
+    # استخراج البيانات
     poster = session["poster"]
     ep = session["ep"]
     dur = session["duration"]
-    tag = session["series_tag"]
-    title = session["title"]  # من caption أو فارغ
+    title = session["title"]
 
+    # حفظ في قاعدة البيانات
     db_query(
-        "INSERT INTO videos (v_id, duration, poster_id, status, ep_num, series_tag, quality, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (v_id, dur, poster, "posted", ep, tag, quality, title),
+        "INSERT INTO videos (v_id, duration, poster_id, status, ep_num, quality, title) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (v_id, dur, poster, "posted", ep, quality_part, title),
         fetch=False
     )
 
     bot_me = await client.get_me()
     watch_link = f"https://t.me/{bot_me.username}?start={v_id}"
 
-    # إذا كان العنوان فارغ لا يظهر أي شيء، وإلا يظهر العنوان
-    caption = f"{title}\n" if title else ""
+    # تنسيق الرسالة النهائية
+    caption = f"🎬 **{title}**\n" if title else ""
     caption += (f"🔹 الحلقة: {ep}\n"
-                f"✨ الجودة: {quality}\n"
+                f"✨ الجودة: {quality_part}\n"
                 f"⏱ المدة: {dur}\n\n"
                 f"📥 اضغط الزر أدناه لمشاهدة الحلقة:")
 
@@ -152,8 +175,8 @@ async def finalize_and_post(client, query: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ فتح الحلقة الآن", url=watch_link)]])
         )
-        await query.message.edit_text(f"🚀 تم النشر بنجاح! | الحلقة {ep} | الجودة: {quality}")
-        sessions.pop(v_id, None)
+        await query.message.edit_text(f"🚀 **تم النشر بنجاح!**\n🎬 {title}\n🔢 الحلقة {ep}\n✨ الجودة: {quality_part}")
+        sessions.pop(v_id, None) # مسح الجلسة بعد النجاح
     except Exception as e:
         await query.message.edit_text(f"❌ حدث خطأ أثناء النشر:\n`{str(e)}`")
 
