@@ -9,7 +9,7 @@ from pyrogram.errors import UserNotParticipant, FloodWait
 # ===== إعدادات التسجيل =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ===== المتغيرات الأساسية (تأكد من ضبطها) =====
+# ===== المتغيرات الأساسية =====
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -48,13 +48,13 @@ def format_duration(seconds):
     mins, secs = divmod(seconds, 60)
     return f"{mins}:{secs:02d} دقيقة"
 
-# ===== استقبال الفيديوهات الجديدة =====
+# ===== استقبال الفيديوهات والبوسترات الجديدة =====
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration = message.video.duration if message.video else getattr(message.document, "duration", 0)
     db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)", 
                (str(message.id), format_duration(duration), "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم ربط الفيديو (ID: {message.id})\n🖼 أرسل البوستر الأصلي (صورة عادية).")
+    await message.reply_text(f"✅ تم ربط الفيديو {message.id}\n🖼 أرسل البوستر الأصلي الآن.")
 
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
@@ -63,7 +63,7 @@ async def receive_poster(client, message):
     v_id = res[0][0]
     db_execute("UPDATE videos SET title=?, poster_id=?, poster_file_id=?, status='awaiting_ep' WHERE v_id=?",
                (message.caption or "حلقة جديدة", message.photo.file_unique_id, message.photo.file_id, v_id), fetch=False)
-    await message.reply_text(f"📌 تم اعتماد البوستر الأصلي للفيديو {v_id}.\n🔢 أرسل رقم الحلقة:")
+    await message.reply_text(f"📌 تم الربط بـ {v_id}.\n🔢 أرسل رقم الحلقة:")
 
 @app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start","stats","edit","fix_old_data"]))
 async def receive_ep_number(client, message):
@@ -91,46 +91,41 @@ async def quality_callback(client, query):
     await query.message.delete()
     await query.answer("✅ تم النشر!", show_alert=True)
 
-# ===== الدالة المنقذة المحدثة (تجنب خطأ التاريخ و Peer ID) =====
+# ===== أمر الإصلاح النهائي (حل مشكلة GetHistory) =====
 @app.on_message(filters.command("fix_old_data") & filters.private)
 async def fix_old_data(client, message):
-    msg_wait = await message.reply_text("⏳ جاري تنشيط القناة وبدء الفحص...")
+    msg_wait = await message.reply_text("🚀 جاري فحص القناة باستخدام محرك البحث لتجاوز قيود تليجرام...")
     count_linked, count_videos = 0, 0
     
     try:
-        # خطوة هامة: تنشيط المعرف
-        await client.get_chat(CHANNEL_ID)
-        
-        # سحب الرسائل كـ Iterator (متوافق مع البوتات)
-        async for msg in client.get_chat_history(CHANNEL_ID):
+        # استخدام البحث بدلاً من جلب السجل الكامل
+        async for vid_msg in client.search_messages(CHANNEL_ID, filter="video"):
             try:
-                is_video = msg.video or (msg.document and "video" in (msg.document.mime_type or ""))
-                if is_video:
-                    v_id = str(msg.id)
-                    db_execute("INSERT OR IGNORE INTO videos (v_id, status) VALUES (?, ?)", (v_id, "posted"), fetch=False)
-                    count_videos += 1
+                v_id = str(vid_msg.id)
+                db_execute("INSERT OR IGNORE INTO videos (v_id, status) VALUES (?, ?)", (v_id, "posted"), fetch=False)
+                count_videos += 1
 
-                    # البحث 50 رسالة للخلف عن الصورة الأصلية
-                    async for search_msg in client.get_chat_history(CHANNEL_ID, limit=50, offset_id=msg.id):
-                        if search_msg.photo and not getattr(search_msg.photo, "animation", False):
-                            p = search_msg.photo
-                            db_execute("UPDATE videos SET poster_id=?, poster_file_id=?, status='posted' WHERE v_id=?",
-                                       (p.file_unique_id, p.file_id, v_id), fetch=False)
-                            count_linked += 1
-                            break
-                    
-                    if count_videos % 10 == 0:
-                        try: await msg_wait.edit(f"⏳ جاري الربط...\n🎬 تم فحص {count_videos} فيديو\n🖼 تم ربط {count_linked} بوستر")
-                        except: pass
+                # البحث عن البوستر (الصورة) قبل الفيديو بـ 50 رسالة
+                async for search_msg in client.get_chat_history(CHANNEL_ID, limit=50, offset_id=vid_msg.id):
+                    if search_msg.photo and not getattr(search_msg.photo, "animation", False):
+                        p = search_msg.photo
+                        db_execute("UPDATE videos SET poster_id=?, poster_file_id=?, status='posted' WHERE v_id=?",
+                                   (p.file_unique_id, p.file_id, v_id), fetch=False)
+                        count_linked += 1
+                        break
+                
+                if count_videos % 20 == 0:
+                    try: await msg_wait.edit(f"⏳ جاري الربط...\n🎬 تم العثور على {count_videos} فيديو\n🖼 تم ربط {count_linked} بوستر")
+                    except: pass
             except FloodWait as e:
                 await asyncio.sleep(e.value)
             except: continue
 
-        await msg_wait.edit(f"🏁 اكتمل الإصلاح بنجاح!\n🎬 فيديوهات: `{count_videos}`\n🖼 بوسترات أصلية: `{count_linked}`")
+        await msg_wait.edit(f"🏁 **اكتمل الإصلاح!**\n🎬 فيديوهات: `{count_videos}`\n🖼 بوسترات مربوطة: `{count_linked}`")
     except Exception as e:
-        await msg_wait.edit(f"❌ حدث خطأ:\n`{str(e)}` \n\nتأكد أن البوت مشرف والـ ID يبدأ بـ -100")
+        await msg_wait.edit(f"❌ خطأ:\n`{str(e)}`")
 
-# ===== نظام Start + تمييز الحلقة ▶️ =====
+# ===== نظام Start والعرض بالحلقات =====
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,), fetch=False)
@@ -148,7 +143,6 @@ async def start_handler(client, message):
         res = db_execute("SELECT poster_id FROM videos WHERE v_id=?", (v_id,))
         if res and res[0][0]:
             p_id = res[0][0]
-            db_execute("INSERT OR IGNORE INTO subscriptions (user_id, poster_id) VALUES (?, ?)", (message.from_user.id, p_id), fetch=False)
             all_ep = db_execute("SELECT v_id, ep_num FROM videos WHERE poster_id=? AND status='posted' ORDER BY ep_num ASC", (p_id,))
             
             if len(all_ep) > 1:
@@ -158,14 +152,13 @@ async def start_handler(client, message):
                     row.append(InlineKeyboardButton(label, url=f"https://t.me/{(await client.get_me()).username}?start={vid}"))
                     if len(row) == 5: btns.append(row); row = []
                 if row: btns.append(row)
-                await message.reply_text("📺 حلقات هذا المسلسل:", reply_markup=InlineKeyboardMarkup(btns))
+                await message.reply_text("📺 باقي الحلقات:", reply_markup=InlineKeyboardMarkup(btns))
 
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك بالقناة", url=f"https://t.me/{PUBLIC_CHANNEL}")],
                [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
-        await message.reply_text("⚠️ اشترك أولاً للمشاهدة.", reply_markup=InlineKeyboardMarkup(btn))
+        await message.reply_text("⚠️ يجب الاشتراك أولاً.", reply_markup=InlineKeyboardMarkup(btn))
 
-# ===== التحقق من الاشتراك =====
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def check_sub(client, query):
     v_id = query.data.split("_")[1]
