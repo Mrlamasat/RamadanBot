@@ -25,12 +25,6 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS videos 
                       (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
                        poster_id TEXT, ep_num INTEGER, status TEXT)''')
-    
-    cursor.execute("PRAGMA table_info(videos)")
-    columns = [col[1] for col in cursor.fetchall()]
-    for col_name in ["duration", "title", "ep_num"]:
-        if col_name not in columns:
-            cursor.execute(f"ALTER TABLE videos ADD COLUMN {col_name} TEXT")
     conn.commit()
     conn.close()
 
@@ -45,7 +39,7 @@ def db_execute(query, params=(), fetch=True):
     conn.close()
     return res
 
-# 1. استقبال الفيديو
+# 1. عند إرسال الفيديو
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
     duration_sec = message.video.duration if message.video else 0
@@ -54,19 +48,20 @@ async def receive_video(client, message):
     
     db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)",
                (str(message.id), duration_str, "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم استلام الفيديو\n⏱ المدة: {duration_str}\n\nالآن أرسل **البوستر**.")
+    await message.reply_text(f"✅ تم استلام الفيديو\n⏱ المدة: {duration_str}\n\nأرسل الآن **البوستر (صورة فقط)**.")
 
-# 2. استقبال البوستر
+# 2. عند إرسال البوستر (لا يشترط وجود وصف)
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
     res = db_execute("SELECT v_id FROM videos WHERE status = 'waiting' ORDER BY rowid DESC LIMIT 1")
     if not res: return
     v_id = res[0][0]
+    
     db_execute("UPDATE videos SET poster_id = ?, status = 'awaiting_ep' WHERE v_id = ?",
                (message.photo.file_id, v_id), fetch=False)
-    await message.reply_text(f"📌 تم ربط البوستر.\nالآن أرسل **رقم الحلقة**:")
+    await message.reply_text(f"📌 تم ربط البوستر.\nالآن أرسل **رقم الحلقة** (رسالة نصية فقط):")
 
-# 3. النشر المزدوج في القناتين
+# 3. عند إرسال رقم الحلقة نصياً والنشر
 @app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start"]))
 async def receive_ep_number(client, message):
     res = db_execute("SELECT v_id, poster_id, duration FROM videos WHERE status = 'awaiting_ep' ORDER BY rowid DESC LIMIT 1")
@@ -74,12 +69,12 @@ async def receive_ep_number(client, message):
     
     v_id, p_id, duration = res[0]
     ep_num = message.text
+    
     db_execute("UPDATE videos SET ep_num = ?, status = 'posted' WHERE v_id = ?", (ep_num, v_id), fetch=False)
     
     bot_info = await client.get_me()
     link = f"https://t.me/{bot_info.username}?start={v_id}"
     
-    # التنسيق المطلوب
     caption_text = (f"🎬 **الحلقة {ep_num}**\n"
                     f"⏱ المـدة: {duration}\n"
                     f"✨ الجـودة: HD\n\n"
@@ -91,28 +86,40 @@ async def receive_ep_number(client, message):
          InlineKeyboardButton("⭐️ 9.5/10", callback_data="rate")]
     ])
     
-    # النشر في القناة الأولى
     await client.send_photo(f"@{PUBLIC_CHANNEL}", photo=p_id, caption=caption_text, reply_markup=buttons)
+    try: await client.send_photo(f"@{SECOND_CHANNEL}", photo=p_id, caption=caption_text, reply_markup=buttons)
+    except: pass
     
-    # النشر في القناة الثانية
-    try:
-        await client.send_photo(f"@{SECOND_CHANNEL}", photo=p_id, caption=caption_text, reply_markup=buttons)
-        await message.reply_text(f"✅ تم النشر بنجاح في القناتين!")
-    except Exception as e:
-        await message.reply_text(f"✅ نُشر في الأولى، وفشل في الثانية (تأكد من أن البوت مشرف هناك).\nالخطأ: {e}")
+    await message.reply_text(f"🚀 تم النشر بنجاح في القناتين!")
 
-# 4. نظام الـ Start للمشتركين
+# 4. نظام Start مع عرض "المزيد من الحلقات"
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     if len(message.command) <= 1:
         await message.reply_text("أهلاً بك في بوت المسلسلات! 🌙")
         return
     v_id = message.command[1]
-    
-    # فحص الاشتراك في القناة الأولى (أو يمكنك فحص القناتين حسب رغبتك)
     try:
         await client.get_chat_member(f"@{PUBLIC_CHANNEL}", message.from_user.id)
+        
+        # إرسال الفيديو الأصلي
         await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id), protect_content=True)
+        
+        # ميزة "المزيد من الحلقات": البحث عن كل الحلقات التي تملك نفس البوستر
+        current_video = db_execute("SELECT poster_id FROM videos WHERE v_id = ?", (v_id,))
+        if current_video:
+            p_id = current_video[0][0]
+            all_episodes = db_execute("SELECT v_id, ep_num FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY CAST(ep_num AS INTEGER) ASC", (p_id,))
+            
+            if len(all_episodes) > 1:
+                btns = []; row = []
+                for vid, num in all_episodes:
+                    label = f"الحلقة {num}"
+                    row.append(InlineKeyboardButton(label, url=f"https://t.me/{(await client.get_me()).username}?start={vid}"))
+                    if len(row) == 2: btns.append(row); row = []
+                if row: btns.append(row)
+                await message.reply_text("📺 **باقي حلقات المسلسل:**", reply_markup=InlineKeyboardMarkup(btns))
+
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك في القناة", url=f"https://t.me/{PUBLIC_CHANNEL}")],
                [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
