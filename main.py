@@ -21,14 +21,16 @@ app = Client("BottemoBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 def init_db():
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS videos (
-                        v_id TEXT PRIMARY KEY,
-                        duration INTEGER,
-                        poster_id TEXT,
-                        status TEXT,
-                        ep_num INTEGER,
-                        user_id INTEGER
-                      )''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS videos (
+            v_id TEXT PRIMARY KEY,
+            duration INTEGER,
+            poster_id TEXT,
+            status TEXT,
+            ep_num INTEGER,
+            user_id INTEGER
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -52,14 +54,21 @@ def format_duration(seconds):
 async def receive_video(client, message):
     v_id = str(message.id)
     duration_sec = message.video.duration if message.video else getattr(message.document, "duration", 0)
+
+    # التحقق من آخر poster_id موجود (لإضافة الحلقة لمسلسل قديم)
+    last_poster = db_execute(
+        "SELECT poster_id FROM videos WHERE status='posted' ORDER BY rowid DESC LIMIT 1"
+    )
+    poster_id = last_poster[0][0] if last_poster else None
+
     db_execute(
-        "INSERT INTO videos (v_id, duration, status, user_id) VALUES (?, ?, ?, ?)",
-        (v_id, duration_sec, "waiting", message.from_user.id),
+        "INSERT INTO videos (v_id, duration, poster_id, status, user_id) VALUES (?, ?, ?, ?, ?)",
+        (v_id, duration_sec, poster_id, "waiting", message.from_user.id),
         fetch=False
     )
-    await message.reply_text("✅ تم استلام الفيديو.\n🖼 الآن أرسل البوستر.")
+    await message.reply_text("✅ تم استلام الفيديو.\n🖼 الآن أرسل البوستر أو تجاهل إذا المسلسل موجود مسبقاً.")
 
-# ===== 2. استلام البوستر وربط الحلقات =====
+# ===== 2. استلام البوستر (اختياري) =====
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
 async def receive_poster(client, message):
     res = db_execute(
@@ -69,12 +78,23 @@ async def receive_poster(client, message):
     if not res:
         return
     v_id = res[0][0]
-    db_execute(
-        "UPDATE videos SET poster_id=?, status='awaiting_ep' WHERE v_id=?",
-        (message.photo.file_id, v_id),
-        fetch=False
-    )
-    await message.reply_text("🖼 تم حفظ البوستر.\n🔢 أرسل الآن رقم الحلقة:")
+
+    # تحديث البوستر فقط إذا لم يكن موجود مسبقاً
+    current_poster = db_execute("SELECT poster_id FROM videos WHERE v_id=?", (v_id,))
+    if not current_poster[0][0]:
+        db_execute(
+            "UPDATE videos SET poster_id=?, status='awaiting_ep' WHERE v_id=?",
+            (message.photo.file_id, v_id),
+            fetch=False
+        )
+    else:
+        # إذا يوجد poster_id مسبقاً، فقط تحديث الحالة
+        db_execute(
+            "UPDATE videos SET status='awaiting_ep' WHERE v_id=?",
+            (v_id,),
+            fetch=False
+        )
+    await message.reply_text("🖼 تم حفظ البوستر أو استخدام البوستر السابق.\n🔢 أرسل الآن رقم الحلقة:")
 
 # ===== 3. استلام رقم الحلقة =====
 @app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start"]))
@@ -119,9 +139,8 @@ async def publish_now(client, query):
                f"✨ الجودة: {quality}\n\n"
                f"📥 مشاهدة الآن")
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الآن", url=watch_link)]])
-    
+
     try:
-        # نشر الفيديو نفسه مع البوستر كصورة مصغرة
         await client.send_video(chat_id=f"@{PUBLIC_CHANNEL}", video=int(v_id), thumb=poster_id, caption=caption, reply_markup=markup)
         db_execute("UPDATE videos SET status='posted' WHERE v_id=?", (v_id,), fetch=False)
         await query.message.edit_text("🚀 تم النشر بنجاح.")
@@ -149,14 +168,13 @@ async def start_handler(client, message):
 
 async def send_video_with_list(client, chat_id, v_id):
     try:
-        # إرسال الفيديو أولاً
         await client.copy_message(chat_id, CHANNEL_ID, int(v_id), protect_content=True)
     except Exception as e:
         logging.error(f"Error sending video: {e}")
         await client.send_message(chat_id, "❌ الحلقة غير متوفرة حالياً.")
         return
 
-    # عرض قائمة الحلقات حسب البوستر
+    # عرض قائمة الحلقات لكل الحلقات بنفس poster_id
     try:
         res = db_execute("SELECT poster_id FROM videos WHERE v_id=?", (v_id,))
         if res and res[0][0]:
