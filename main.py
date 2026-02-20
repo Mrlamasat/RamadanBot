@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import logging
-import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant
@@ -15,24 +14,23 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
 PUBLIC_CHANNEL = os.environ.get("PUBLIC_CHANNEL", "").replace("@", "")
+SECOND_CHANNEL = os.environ.get("SECOND_CHANNEL", "RamadanSeries26").replace("@", "")
 
 app = Client("MohammedSmartBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ===== تهيئة قاعدة البيانات وإصلاحها تلقائياً =====
+# ===== تهيئة قاعدة البيانات =====
 def init_db():
     conn = sqlite3.connect("bot_data.db")
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS videos 
                       (v_id TEXT PRIMARY KEY, duration TEXT, title TEXT, 
-                       poster_id TEXT, poster_file_id TEXT, ep_num INTEGER, status TEXT)''')
+                       poster_id TEXT, ep_num INTEGER, status TEXT)''')
     
-    # فحص الأعمدة لضمان التوافق مع الـ 70 فيديو القديمة
     cursor.execute("PRAGMA table_info(videos)")
     columns = [col[1] for col in cursor.fetchall()]
-    needed = {"duration": "TEXT", "title": "TEXT", "ep_num": "INTEGER", "poster_file_id": "TEXT"}
-    for col, type_col in needed.items():
-        if col not in columns:
-            cursor.execute(f"ALTER TABLE videos ADD COLUMN {col} {type_col}")
+    for col_name in ["duration", "title", "ep_num"]:
+        if col_name not in columns:
+            cursor.execute(f"ALTER TABLE videos ADD COLUMN {col_name} TEXT")
     conn.commit()
     conn.close()
 
@@ -47,87 +45,82 @@ def db_execute(query, params=(), fetch=True):
     conn.close()
     return res
 
-# 1. عند إرسال الفيديو في قناة التخزين
+# 1. استقبال الفيديو
 @app.on_message(filters.chat(CHANNEL_ID) & (filters.video | filters.document))
 async def receive_video(client, message):
-    db_execute("INSERT OR REPLACE INTO videos (v_id, status) VALUES (?, ?)",
-               (str(message.id), "waiting"), fetch=False)
-    await message.reply_text(f"✅ تم استلام الفيديو ({message.id})\nالآن أرسل البوستر واكتب رقم الحلقة في الوصف.")
+    duration_sec = message.video.duration if message.video else 0
+    mins, secs = divmod(duration_sec, 60)
+    duration_str = f"{mins}:{secs:02d} دقيقة"
+    
+    db_execute("INSERT OR REPLACE INTO videos (v_id, duration, status) VALUES (?, ?, ?)",
+               (str(message.id), duration_str, "waiting"), fetch=False)
+    await message.reply_text(f"✅ تم استلام الفيديو\n⏱ المدة: {duration_str}\n\nالآن أرسل **البوستر**.")
 
-# 2. عند إرسال البوستر مع رقم الحلقة (النشر الفوري الذكي)
+# 2. استقبال البوستر
 @app.on_message(filters.chat(CHANNEL_ID) & filters.photo)
-async def receive_poster_and_ep(client, message):
+async def receive_poster(client, message):
     res = db_execute("SELECT v_id FROM videos WHERE status = 'waiting' ORDER BY rowid DESC LIMIT 1")
     if not res: return
     v_id = res[0][0]
-    
-    caption = message.caption or ""
-    ep_match = re.search(r'\d+', caption)
-    ep_num = int(ep_match.group()) if ep_match else None
-    title = caption.replace(str(ep_num), "").strip() if ep_num else caption
-    if not title: title = "مسلسل جديد"
+    db_execute("UPDATE videos SET poster_id = ?, status = 'awaiting_ep' WHERE v_id = ?",
+               (message.photo.file_id, v_id), fetch=False)
+    await message.reply_text(f"📌 تم ربط البوستر.\nالآن أرسل **رقم الحلقة**:")
 
-    db_execute("UPDATE videos SET poster_id = ?, poster_file_id = ?, ep_num = ?, title = ?, status = 'posted' WHERE v_id = ?",
-               (message.photo.file_id, message.photo.file_id, ep_num, title, v_id), fetch=False)
+# 3. النشر المزدوج في القناتين
+@app.on_message(filters.chat(CHANNEL_ID) & filters.text & ~filters.command(["start"]))
+async def receive_ep_number(client, message):
+    res = db_execute("SELECT v_id, poster_id, duration FROM videos WHERE status = 'awaiting_ep' ORDER BY rowid DESC LIMIT 1")
+    if not res or not message.text.isdigit(): return
+    
+    v_id, p_id, duration = res[0]
+    ep_num = message.text
+    db_execute("UPDATE videos SET ep_num = ?, status = 'posted' WHERE v_id = ?", (ep_num, v_id), fetch=False)
     
     bot_info = await client.get_me()
     link = f"https://t.me/{bot_info.username}?start={v_id}"
     
-    # تنسيق المنشور في القناة العامة (من ميزات الكود الأخير)
-    msg_text = f"🎬 **{title}**\n"
-    if ep_num: msg_text += f"🔢 رقم الحلقة: {ep_num}\n"
-    msg_text += f"\n📥 [مشاهدة الآن من هنا]({link})"
+    # التنسيق المطلوب
+    caption_text = (f"🎬 **الحلقة {ep_num}**\n"
+                    f"⏱ المـدة: {duration}\n"
+                    f"✨ الجـودة: HD\n\n"
+                    f"📥 مشاهدة الآن")
     
-    await client.send_photo(f"@{PUBLIC_CHANNEL}", photo=message.photo.file_id, caption=msg_text,
-                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ مشاهدة الآن", url=link)]]))
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ مشـاهدة الآن", url=link)],
+        [InlineKeyboardButton("🔥 أعجبتني", callback_data="like"), 
+         InlineKeyboardButton("⭐️ 9.5/10", callback_data="rate")]
+    ])
     
-    await message.reply_text(f"✅ تم النشر بنجاح في القناة العامة!")
+    # النشر في القناة الأولى
+    await client.send_photo(f"@{PUBLIC_CHANNEL}", photo=p_id, caption=caption_text, reply_markup=buttons)
+    
+    # النشر في القناة الثانية
+    try:
+        await client.send_photo(f"@{SECOND_CHANNEL}", photo=p_id, caption=caption_text, reply_markup=buttons)
+        await message.reply_text(f"✅ تم النشر بنجاح في القناتين!")
+    except Exception as e:
+        await message.reply_text(f"✅ نُشر في الأولى، وفشل في الثانية (تأكد من أن البوت مشرف هناك).\nالخطأ: {e}")
 
-# 3. نظام الـ Start (يدعم الترقيم التلقائي للقديم والجديد)
+# 4. نظام الـ Start للمشتركين
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     if len(message.command) <= 1:
-        await message.reply_text(f"أهلاً بك يا {message.from_user.first_name} في بوت المسلسلات! 🌙")
+        await message.reply_text("أهلاً بك في بوت المسلسلات! 🌙")
         return
     v_id = message.command[1]
+    
+    # فحص الاشتراك في القناة الأولى (أو يمكنك فحص القناتين حسب رغبتك)
     try:
-        # فحص الاشتراك الإجباري
         await client.get_chat_member(f"@{PUBLIC_CHANNEL}", message.from_user.id)
-        
-        # إرسال الفيديو (محمي من الحفظ والتحويل)
         await client.copy_message(message.chat.id, CHANNEL_ID, int(v_id), protect_content=True)
-        
-        # عرض قائمة الحلقات (مع الترقيم الذكي)
-        video_data = db_execute("SELECT poster_id FROM videos WHERE v_id = ?", (v_id,))
-        if video_data and video_data[0][0]:
-            p_id = video_data[0][0]
-            all_ep = db_execute("SELECT v_id, ep_num FROM videos WHERE poster_id = ? AND status = 'posted' ORDER BY rowid ASC", (p_id,))
-            
-            if len(all_ep) > 1:
-                btns = []; row = []
-                for i, (v_id_item, num) in enumerate(all_ep, 1):
-                    # إذا كان الرقم None (قديم) يستخدم الترتيب i
-                    display_num = num if (num is not None and num != "") else i
-                    label = f"الحلقة {display_num}"
-                    row.append(InlineKeyboardButton(label, url=f"https://t.me/{(await client.get_me()).username}?start={v_id_item}"))
-                    if len(row) == 2: btns.append(row); row = []
-                if row: btns.append(row)
-                await message.reply_text("📺 باقي حلقات المسلسل:", reply_markup=InlineKeyboardMarkup(btns))
-                
     except UserNotParticipant:
         btn = [[InlineKeyboardButton("📢 اشترك في القناة", url=f"https://t.me/{PUBLIC_CHANNEL}")],
                [InlineKeyboardButton("✅ تم الاشتراك", callback_data=f"chk_{v_id}")]]
         await message.reply_text("⚠️ اشترك أولاً لمشاهدة الحلقة.", reply_markup=InlineKeyboardMarkup(btn))
 
-# 4. أوامر إدارية (لتعديل الأسماء)
-@app.on_message(filters.command("edit") & filters.private)
-async def edit_title(client, message):
-    if len(message.command) < 3:
-        await message.reply_text("الاستخدام: `/edit [v_id] [العنوان الجديد]`")
-        return
-    v_id, new_title = message.command[1], " ".join(message.command[2:])
-    db_execute("UPDATE videos SET title = ? WHERE v_id = ?", (new_title, v_id), fetch=False)
-    await message.reply_text(f"✅ تم تحديث العنوان إلى: {new_title}")
+@app.on_callback_query(filters.regex("^(like|rate)$"))
+async def interactions(client, query):
+    await query.answer("شكراً لتفاعلك! 🔥", show_alert=False)
 
 @app.on_callback_query(filters.regex(r"^chk_"))
 async def chk_callback(client, query):
